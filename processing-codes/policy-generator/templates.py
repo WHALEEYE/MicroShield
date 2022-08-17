@@ -1,3 +1,8 @@
+"""
+This file contains some templates for the policy generator.
+"""
+
+
 def policy_template(name, namespace, pod_selector, use_dns):
     return {
         "apiVersion": "networking.k8s.io/v1",

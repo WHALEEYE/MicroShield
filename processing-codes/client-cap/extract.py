@@ -3,8 +3,10 @@ import re
 import time
 
 """
-    The format of conntrack records is  [CONN] [conntrack] {hostname|MsgType|TCPState|Orig(Src|SrcPort|Dst|DstPort)|Reply(Src|SrcPort|Dst|DstPort) CtID}
-    The format of eBPF records is       [CONN] [eBPF] {hostname|timestamp|CPU|IPv4Event|pid|comm|Src|Dst|SrcPort|DstPort|NetNS|Fd}
+    The format of conntrack records:
+        [CONN] [conntrack] {hostname|MsgType|TCPState|Orig(Src|SrcPort|Dst|DstPort)|Reply(Src|SrcPort|Dst|DstPort) CtID}
+    The format of eBPF records:
+        [CONN] [eBPF] {hostname|timestamp|CPU|IPv4Event|pid|comm|Src|Dst|SrcPort|DstPort|NetNS|Fd}
 """
 
 LOG_FILE = "../data/records.log"
@@ -17,6 +19,9 @@ pods = {}
 
 
 class Tuple:
+    """
+        Represents the four tuple of a flow.
+    """
 
     def __init__(self, src_addr, src_port, dst_addr, dst_port):
         self.src_addr = src_addr
@@ -30,6 +35,9 @@ class Tuple:
 
 
 class Record:
+    """
+    An abstract class representing one record of flow.
+    """
 
     def __init__(self, hostname, timestamp, four_tuple):
         self.hostname = hostname
@@ -60,6 +68,13 @@ class ConnTrackRecord(Record):
 
 
 def parse_eBPF(timestamp, record_str):
+    """
+    Parse a eBPF object from one line of log.
+    Only flow in state of 'Accept' will be parsed and the others will be dropped to avoid duplication.
+
+    Returns:
+        a list of valid eBPFRecord objects
+    """
     fields = record_str.split("|")
     if fields[3] == "Accept":
         only_tuple = Tuple(fields[6], int(fields[8]), fields[7], int(fields[9]))
@@ -70,6 +85,10 @@ def parse_eBPF(timestamp, record_str):
 
 
 def parse_conntrack(timestamp, record_str):
+    """
+    Parse a ConnTrack object from one line of log.
+    This method is not used in this version since we do not care about ConnTrack for now.
+    """
     fields = record_str.split("|")
     orig_tuple = Tuple(fields[3], int(fields[4]), fields[5], int(fields[6]))
     dst_tuple = Tuple(fields[7], int(fields[8]), fields[9], int(fields[10]))
@@ -78,6 +97,10 @@ def parse_conntrack(timestamp, record_str):
 
 
 def generate_ep_id(hostname, addr, port):
+    """
+    Generate the ID of one endpoint in the convention of Weave Scope: if the address is '127.0.0.1', then the ID will
+    be '<hostname>;<addr>;<port>' else the ID will be ';<addr>;<port>'.
+    """
     if addr != "127.0.0.1":
         hostname = ""
     return f"{hostname};{addr};{port}"
@@ -88,6 +111,10 @@ SERVICE_SELECTOR = "kubernetes_selector"
 
 
 def compress_info(info):
+    """
+    Optimize the information.
+    This method will delete the unused fields.
+    """
     compressed_info = {"id": info["id"], "labels": {}}
     labels = compressed_info["labels"]
     if "latest" in info:
@@ -105,6 +132,12 @@ def compress_info(info):
 
 
 def compress_pod(pod_info):
+    """
+    Compress the pod's info, delete the redundant information and try to link it to a service.
+
+    Returns:
+        a dictionary containing compressed information of pod and its corresponding service
+    """
     service_info = {}
     if "parents" in pod_info and pod_info["parents"] is not None:
         if "service" in pod_info["parents"] and pod_info["parents"]["service"][0] in services:
@@ -114,6 +147,12 @@ def compress_pod(pod_info):
 
 
 def extract(records, report):
+    """
+    Link the flow with pods and services, optimize and output processed flows.
+
+    Return:
+        a list of processes flows in the form which is readable by policy generator
+    """
     global services
     global endpoints
     global processes
@@ -123,14 +162,11 @@ def extract(records, report):
     endpoints_to_pod = {}
     flows = []
     for line in records:
-        # if "[CONN] [conntrack]" in line:
-        #     rst = re.search(r"<probe> INFO: (.*)(\..*) \[CONN] \[conntrack] \{(.*)}", line.strip())
-        #     time_array = time.strptime(rst.group(1), "%Y/%m/%d %H:%M:%S")
-        #     flows += parse_conntrack((time.mktime(time_array)) + float(rst.group(2)), rst.group(3))
-        if "[CONN] [eBPF]" in line:
-            rst = re.search(r"<probe> INFO: (.*)(\..*) \[CONN] \[eBPF] \{(.*)}", line.strip())
-            time_array = time.strptime(rst.group(1), "%Y/%m/%d %H:%M:%S")
-            flows += parse_eBPF((time.mktime(time_array)) + float(rst.group(2)), rst.group(3))
+        rst = re.search(r"<probe> INFO: (.*)(\..*) \[CONN] \[eBPF] \{(.*)}", line.strip())
+        if not rst:
+            continue
+        time_array = time.strptime(rst.group(1), "%Y/%m/%d %H:%M:%S")
+        flows += parse_eBPF((time.mktime(time_array)) + float(rst.group(2)), rst.group(3))
 
         endpoints = report["Endpoint"]["nodes"]
         processes = report["Process"]["nodes"]
@@ -161,12 +197,12 @@ def extract(records, report):
     processed_records = []
     services = report["Service"]["nodes"]
 
-    # print the hostname and the total number of records in the host
     for flow in flows:
         hostname = flow.hostname
         src_ep = generate_ep_id(hostname, flow.four_tuple.src_addr, flow.four_tuple.src_port)
         dst_ep = generate_ep_id(hostname, flow.four_tuple.dst_addr, flow.four_tuple.dst_port)
         if src_ep in endpoints_to_pod and dst_ep in endpoints_to_pod:
+            # Only flows with both endpoints having corresponding pod will be exported
             tmp_dict = flow.short_json()
             tmp_dict["src"] = compress_pod(endpoints_to_pod[src_ep])
             tmp_dict["dst"] = compress_pod(endpoints_to_pod[dst_ep])
