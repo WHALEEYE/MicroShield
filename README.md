@@ -136,7 +136,7 @@ You can generate policy with `generator.py` with captured flow file anytime on a
 
   Whether to apply single network policy to all pods in the namespace or split them to different network policies. The default value is `true`.
 
-  About the information of these two modes, see [this section](#all-pods).
+  About the information of these two modes, see section `All Pods?`.
 
 After entering these options, it will read the flows from `processing-codes/data/flows.json`, display the aggregated connections and let the user to enter commands.
 
