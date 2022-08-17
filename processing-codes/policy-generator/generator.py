@@ -187,7 +187,8 @@ ALLOW_DNS = True
 def add_flow(flow_info, direction, src_id, dst_id):
     """
     Try to add flow into aggregated flow list.
-    It will detect duplication by detecting whether there is flow with the same direction, source service ID and destination service ID existing in the list.
+    It will detect duplication by detecting whether there is flow with the same direction, source service ID and
+    destination service ID existing in the list.
     If there is, it will stop adding the flow, so the flow list will finally contain distinct flows.
     """
     global aggregated_flows
