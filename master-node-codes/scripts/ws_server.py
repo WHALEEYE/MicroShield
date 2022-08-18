@@ -13,6 +13,8 @@ async def ws_handler(websocket, path):
             msg = input()
             messages.append(msg)
             if len(messages) >= 300:
+                # the list has reached the specified size
+                # send the batch of flow logs to client
                 await websocket.send(str(messages))
                 await websocket.recv()
                 messages.clear()
