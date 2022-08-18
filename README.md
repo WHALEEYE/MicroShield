@@ -1,6 +1,6 @@
 # Weave Editor
 
-Weave Editor is a system that can capture the east/west flow inside the cluster based on a modified version of weave scope and automatically generate network policies according to aggregated flow.
+Weave Editor is a automatic network policy generating system for Kubernetes clusters. It can capture the east/west flow inside a cluster based on a modified version of weave scope, and automatically generate network policies according to the captured flows.
 
 
 
