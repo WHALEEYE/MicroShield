@@ -26,9 +26,9 @@ class ServiceEnd:
         self.selectors = selectors
 
 
-class Flow:
+class Connection:
     """
-    Represents a flow, containing source and destination service endpoints, and direction.
+    Represents a connection, containing source and destination service endpoints, and direction.
     """
 
     def __init__(self, src, dst, direction):
@@ -171,9 +171,9 @@ class Rule:
             flow.deactivate()
 
 
-existing_flow_keys = []
-aggregated_flows = []
-aggregated_rules = []
+conn_keys = []
+connections = []
+rules = []
 policies = {}
 
 K8S_NS_LABEL = "kubernetes.io/metadata.name"
@@ -191,8 +191,8 @@ def add_flow(flow_info, direction, src_id, dst_id):
     destination service ID existing in the list.
     If there is, it will stop adding the flow, so the flow list will finally contain distinct flows.
     """
-    global aggregated_flows
-    if (direction, src_id, dst_id) in existing_flow_keys:
+    global connections
+    if (direction, src_id, dst_id) in conn_keys:
         return
     else:
         src_svc = flow_info["src"]["service"]
@@ -213,8 +213,8 @@ def add_flow(flow_info, direction, src_id, dst_id):
                          flow_info["tuple"]["src_port"], src_svc_selectors)
         dst = ServiceEnd(dst_id, dst_svc["name"], dst_svc["namespace"], flow_info["tuple"]["dst_addr"],
                          flow_info["tuple"]["dst_port"], dst_svc_selectors)
-        aggregated_flows.append(Flow(src, dst, direction))
-        existing_flow_keys.append((direction, src_id, dst_id))
+        connections.append(Connection(src, dst, direction))
+        conn_keys.append((direction, src_id, dst_id))
 
 
 def aggregate_policy():
@@ -224,11 +224,11 @@ def aggregate_policy():
     """
     if ALL_PODS:
         policies["all"] = Policy(POLICY_NAME, {})
-        for rule in aggregated_rules:
+        for rule in rules:
             policies["all"].link_rule(rule)
             rule.link_policy(policies["all"])
     else:
-        for rule in aggregated_rules:
+        for rule in rules:
             if rule.svc_id not in policies:
                 policies[rule.svc_id] = Policy(f"{POLICY_NAME}-{rule.svc_id[0:4]}", rule.pod_selector)
             policies[rule.svc_id].link_rule(rule)
@@ -240,7 +240,7 @@ def aggregate_rule():
     Aggregate flows into rules.
     After this method is called, each flow will be linked to one rule.
     """
-    for flow in aggregated_flows:
+    for flow in connections:
         if flow.linked_rule is None:
             ns = flow.src.ns if flow.direction == Direction.INGRESS else flow.dst.ns
             pod_labels = flow.src.selectors if flow.direction == Direction.INGRESS else flow.dst.selectors
@@ -250,9 +250,9 @@ def aggregate_rule():
             rule = Rule(flow.direction, ns, pod_labels, None, flow.dst.port, svc_id, pod_selector)
             rule.link_flow(flow)
             flow.link_rule(rule)
-            aggregated_rules.append(rule)
+            rules.append(rule)
             if ALL_PODS:
-                for t_flow in aggregated_flows:
+                for t_flow in connections:
                     if t_flow == flow:
                         continue
                     temp_svc = t_flow.src.svc_name if t_flow.direction == Direction.INGRESS else t_flow.dst.svc_name
@@ -261,7 +261,7 @@ def aggregate_rule():
                         t_flow.link_rule(rule)
 
 
-def aggregate_flow(flows):
+def aggregate_conn(flows):
     """
     Aggregate flows into connections.
     """
@@ -295,16 +295,26 @@ def generate_policy_yaml():
     return policy_yamls
 
 
-def display():
+def display(conn):
     """
     Display a simple panel for user to select rules.
     This is just a temporary function.
     """
     print(f"     {'Direction':20} {'Source':20} {'Destination':20} #")
-    for index, flow in enumerate(aggregated_flows):
+    for index, flow in enumerate(conn):
         mark = "*" if flow.activated else " "
         direction_str = "Ingress" if flow.direction == Direction.INGRESS else "Egress"
         print(f"[{mark}]  {direction_str:20} {flow.src.svc_name:20} {flow.dst.svc_name:20} {index}")
+
+
+def get_connections():
+    """
+    Get the aggregated connections.
+
+    Returns:
+        A list of Connection objects
+    """
+    return connections
 
 
 def save_policies(policy_yamls):
@@ -330,17 +340,17 @@ if __name__ == "__main__":
     ALLOW_DNS = input("Allow DNS? (\033[36my\033[0m/n): ") != "n"
     with open("../data/flows.json", "r", encoding='utf8') as f:
         records = f.readlines()
-    aggregate_flow(records)
+    aggregate_conn(records)
 
     # Simple display loop for user to select rules.
-    display()
+    display(get_connections())
     while True:
         command = input("Enter operation: ")
         op = command.split()
         if op[0] == "s":
-            aggregated_flows[int(op[1])].activate()
+            connections[int(op[1])].activate()
         elif op[0] == "c":
-            aggregated_flows[int(op[1])].deactivate()
+            connections[int(op[1])].deactivate()
         elif op[0] == "g":
             yamls = generate_policy_yaml()
             save_policies(yamls)

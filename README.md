@@ -193,6 +193,28 @@ While in the right figure, we will use pod selector in each policy file, so that
 
 
 
+## Our Advances
+
+We take Cilium Editor, which is also an automatic policy generator for comparison.
+
+### More Flexible
+
+In Cilium Editor, we need to manually specify pod selectors if we want to apply policy to specified pods in namespace, and it can only generate one policy file in one time.
+
+In our system, we offer two granularities of the policies for the user: All pods in namespace or specified pods in namespace.
+
+For the later, we can generate multiple policy YAML files in the same time in a folder in one time.
+
+### More Universal
+
+In Cilium Editor, if the user want to specify the namespace in the rules, the grammar of the policy will only be supported by Cilium. Also, it uses some labels only supported by Cilium to select Pods in a service.
+
+Our system takes leverage of the new K8s label `kubernetes.io/metadata.name` introduced after version 1.22, which will be added to each namespace and can not be changed, which allows the policy to select the namespace with a standard K8s policy grammar.
+
+Also, our system can obtain the pod selector of each service through modified WeaveScope, and we can directly use these selectors to specify pods in each service, which is in a k8s-native manner.
+
+
+
 ## Need More Information?
 
 If you need more detailed information the code or implementation, feel free to check the [spec](./spec.md) and source codes.
