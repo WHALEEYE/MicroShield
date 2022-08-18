@@ -60,7 +60,7 @@ The pod linker and optimizer are logically break into two modules but they are a
 
 All the modules of policy generator is contained in one file [generator.py](processing-codes/policy-generator/generator.py). It will read the **Flow Record File** and try to aggregate the flows into rules (one rule will finally become one entry in the policy file). After that, it will aggregate rules into policies (one policy will finally become one policy YAML file). It will use two one-to-many mappings to maintain the relationships between them.
 
-The policy generator contains a simple panel for user interaction. This panel is not coupled to the core code so you can remove it or modify it easily. You can also create your own UI with the API given. Some important APIs will be shown [there](#important-apis).
+The policy generator contains a simple panel for user interaction. This panel is not coupled to the core code so you can remove it or modify it easily. You can also create your own UI with the API given. Some important APIs will be shown [there](#important-apis--classes).
 
 
 
