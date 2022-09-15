@@ -276,6 +276,7 @@ def aggregate_conn(flows):
             if dst["service"]["namespace"] == NAMESPACE:
                 add_flow(flow_dict, Direction.INGRESS, src["service"]["id"], dst["service"]["id"])
         else:
+            # Non-service traffic will be ignored
             continue
     aggregate_rule()
     aggregate_policy()
