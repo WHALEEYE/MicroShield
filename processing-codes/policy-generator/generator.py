@@ -356,4 +356,4 @@ if __name__ == "__main__":
             yamls = generate_policy_yaml()
             save_policies(yamls)
             break
-        display()
+        display(get_connections())
