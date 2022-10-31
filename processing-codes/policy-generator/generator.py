@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 
@@ -11,15 +12,21 @@ class Direction(enumerate):
     EGRESS = 1
 
 
-class ServiceEnd:
+class Granularity(enumerate):
+    NAMESPACE = 0
+    SERVICE = 1
+    POD = 2
+
+
+class ConnEnd:
     """
-    Represents a service endpoint, containing service ID, name, namespace, IP, port and selector.
+    Represents a connection endpoint, containing ID, name, namespace, IP, port and selector.
     The IP is used to describe the endpoints outside the cluster (CIDR), which is not used in the current version.
     """
 
-    def __init__(self, svc_id, svc_name, ns, ip, port, selectors):
-        self.svc_id = svc_id
-        self.svc_name = svc_name
+    def __init__(self, end_id, name, ns, ip, port, selectors):
+        self.end_id = end_id
+        self.name = name
         self.ns = ns
         self.ip = ip
         self.port = port
@@ -31,9 +38,9 @@ class Connection:
     Represents a connection, containing source and destination service endpoints, and direction.
     """
 
-    def __init__(self, src, dst, direction):
-        self.src = src
-        self.dst = dst
+    def __init__(self, inside_end, svc_end, direction):
+        self.inside_end = inside_end
+        self.svc_end = svc_end
         self.direction = direction
         self.activated = False
         self.linked_rule = None
@@ -72,58 +79,25 @@ class Connection:
             self.linked_rule.deactivate()
 
 
-class Policy:
-    """
-    Represents a policy. Each policy object can generate a policy YAML file.
-    """
-
-    def __init__(self, name, pod_selector):
-        self.template = templates.policy_template(name, NAMESPACE, pod_selector, ALLOW_DNS)
-        self.name = name
-        self.linked_rules = []
-        self.activate_count = 0
-
-    def generate_yaml(self):
-        """
-        Generates a policy YAML file.
-
-        Returns:
-            The YAML file as a string.
-        """
-        for rule in self.linked_rules:
-            if not rule.activated:
-                continue
-            rule_frame = templates.rule_template(rule.direction == Direction.INGRESS)
-            ingress = rule.direction == Direction.INGRESS
-            pod_selector = rule_frame["from" if ingress else "to"][0]
-            pod_selector["namespaceSelector"]["matchLabels"][K8S_NS_LABEL] = rule.ns
-            pod_selector["podSelector"]["matchLabels"] = rule.pod_labels
-            rule_frame["ports"][0]["port"] = rule.port
-            self.template["spec"]["ingress" if ingress else "egress"].append(rule_frame)
-        return yaml.dump(self.template)
-
-    def link_rule(self, rule):
-        """
-        Links the policy to one rule.
-        """
-        self.linked_rules.append(rule)
-
-
 class Rule:
     """
-    Represents a rule, containing direction, namespace, pod labels, CIDR, port, service ID and pod selector.
-    Note that the pod labels here represent the pod selectors in entry,
-    while the pod selectors represent which pod in the namespace should this rule applied to.
+    Represents a rule, containing direction, namespace, selectors, CIDR, port, inside resource name and pod selector.
+
+    Note that the service selectors here represent the pod selectors in entry,
+    while the inside selectors represent which pod(s) in the namespace should this rule applied to.
+
+    The inside name is used to identify the inside resource according to the granularity, so it could be the name of
+    the namespace, service or pod.
     """
 
-    def __init__(self, direction, ns, pod_labels, cidr, port, svc_id, pod_selector):
+    def __init__(self, direction, ns, svc_selector, inside_selector, cidr, port, inside_name):
         self.direction = direction
         self.ns = ns
-        self.pod_labels = pod_labels
+        self.svc_selector = svc_selector
+        self.inside_selector = inside_selector
         self.cidr = cidr
         self.port = port
-        self.svc_id = svc_id
-        self.pod_selector = pod_selector
+        self.inside_name = inside_name
         self.activated = False
         self.linked_flows = []
         self.linked_policy = None
@@ -171,6 +145,43 @@ class Rule:
             flow.deactivate()
 
 
+class Policy:
+    """
+    Represents a policy. Each policy object can generate a policy YAML file.
+    """
+
+    def __init__(self, name, pod_selector):
+        self.template = templates.policy_template(name, NAMESPACE, pod_selector, ALLOW_DNS)
+        self.name = name
+        self.linked_rules = []
+        self.activate_count = 0
+
+    def generate_yaml(self):
+        """
+        Generates a policy YAML file.
+
+        Returns:
+            The YAML file as a string.
+        """
+        for rule in self.linked_rules:
+            if not rule.activated:
+                continue
+            rule_frame = templates.rule_template(rule.direction == Direction.INGRESS)
+            ingress = rule.direction == Direction.INGRESS
+            pod_selector = rule_frame["from" if ingress else "to"][0]
+            pod_selector["namespaceSelector"]["matchLabels"][K8S_NS_LABEL] = rule.ns
+            pod_selector["podSelector"]["matchLabels"] = rule.svc_selector
+            rule_frame["ports"][0]["port"] = rule.port
+            self.template["spec"]["ingress" if ingress else "egress"].append(rule_frame)
+        return yaml.dump(self.template)
+
+    def link_rule(self, rule):
+        """
+        Links the policy to one rule.
+        """
+        self.linked_rules.append(rule)
+
+
 conn_keys = []
 connections = []
 rules = []
@@ -178,13 +189,34 @@ policies = {}
 
 K8S_NS_LABEL = "kubernetes.io/metadata.name"
 
+FILE_PAR_DIR = os.path.abspath(os.path.join(__file__, os.pardir))
 NAMESPACE = "default"
-POLICY_NAME = "my-policy"
-ALL_PODS = True
+OUT_FOLDER_NAME = "my-policy"
+GRANULARITY = Granularity.NAMESPACE
 ALLOW_DNS = True
+INPUT_FILE = FILE_PAR_DIR + "/../data/flows.json"
 
 
-def add_flow(flow_info, direction, src_id, dst_id):
+def extract_selectors(info):
+    """
+    Extracts selectors from the info of services.
+
+    Args:
+        info: The service's info map.
+
+    Returns:
+        A tuple of selectors.
+    """
+    selectors = {}
+    if "selector" in info:
+        raw_selectors = info["selector"].split(",")
+        for selector in raw_selectors:
+            key, value = selector.split("=")
+            selectors[key] = value
+    return selectors
+
+
+def add_conn(direction, inside_info, inside_ip, inside_port, svc_info, svc_ip, svc_port):
     """
     Try to add flow into aggregated flow list.
     It will detect duplication by detecting whether there is flow with the same direction, source service ID and
@@ -192,29 +224,19 @@ def add_flow(flow_info, direction, src_id, dst_id):
     If there is, it will stop adding the flow, so the flow list will finally contain distinct flows.
     """
     global connections
-    if (direction, src_id, dst_id) in conn_keys:
+    inside_id = inside_info["id"]
+    svc_id = svc_info["id"]
+    if (direction, inside_id, svc_id) in conn_keys:
         return
     else:
-        src_svc = flow_info["src"]["service"]
-        dst_svc = flow_info["dst"]["service"]
-        src_svc_selectors = {}
-        if "selector" in src_svc:
-            src_selectors = src_svc["selector"].split(",")
-            for sel in src_selectors:
-                key, value = sel.split("=")
-                src_svc_selectors[key] = value
-        dst_svc_selectors = {}
-        if "selector" in dst_svc:
-            dst_selectors = dst_svc["selector"].split(",")
-            for sel in dst_selectors:
-                key, value = sel.split("=")
-                dst_svc_selectors[key] = value
-        src = ServiceEnd(src_id, src_svc["name"], src_svc["namespace"], flow_info["tuple"]["src_addr"],
-                         flow_info["tuple"]["src_port"], src_svc_selectors)
-        dst = ServiceEnd(dst_id, dst_svc["name"], dst_svc["namespace"], flow_info["tuple"]["dst_addr"],
-                         flow_info["tuple"]["dst_port"], dst_svc_selectors)
-        connections.append(Connection(src, dst, direction))
-        conn_keys.append((direction, src_id, dst_id))
+        # If the granularity is pod, we only need to take all of this pod's labels as selectors
+        inside_selectors = inside_info["labels"] if GRANULARITY == Granularity.POD else extract_selectors(inside_info)
+        svc_selectors = extract_selectors(svc_info)
+        inside_end = ConnEnd(inside_id, inside_info["name"], inside_info["namespace"], inside_ip, inside_port,
+                             inside_selectors)
+        svc_end = ConnEnd(svc_id, svc_info["name"], svc_info["namespace"], svc_ip, svc_port, svc_selectors)
+        connections.append(Connection(inside_end, svc_end, direction))
+        conn_keys.append((direction, inside_id, svc_id))
 
 
 def aggregate_policy():
@@ -222,43 +244,38 @@ def aggregate_policy():
     Aggregate rules into policies.
     After this method is called, each rule will be linked to one policy.
     """
-    if ALL_PODS:
-        policies["all"] = Policy(POLICY_NAME, {})
-        for rule in rules:
-            policies["all"].link_rule(rule)
-            rule.link_policy(policies["all"])
-    else:
-        for rule in rules:
-            if rule.svc_id not in policies:
-                policies[rule.svc_id] = Policy(f"{POLICY_NAME}-{rule.svc_id[0:4]}", rule.pod_selector)
-            policies[rule.svc_id].link_rule(rule)
-            rule.linked_policy = policies[rule.svc_id]
+    global rules, policies
+    for rule in rules:
+        if rule.inside_name not in policies:
+            policies[rule.inside_name] = Policy(f"policy-{rule.inside_name}", rule.inside_selector)
+        policies[rule.inside_name].link_rule(rule)
+        rule.linked_policy = policies[rule.inside_name]
 
 
 def aggregate_rule():
     """
-    Aggregate flows into rules.
+    Aggregate connections into rules.
     After this method is called, each flow will be linked to one rule.
     """
-    for flow in connections:
-        if flow.linked_rule is None:
-            ns = flow.src.ns if flow.direction == Direction.INGRESS else flow.dst.ns
-            pod_labels = flow.src.selectors if flow.direction == Direction.INGRESS else flow.dst.selectors
-            svc = flow.src.svc_name if flow.direction == Direction.INGRESS else flow.dst.svc_name
-            pod_selector = flow.dst.selectors if flow.direction == Direction.INGRESS else flow.src.selectors
-            svc_id = flow.dst.svc_id if flow.direction == Direction.INGRESS else flow.src.svc_id
-            rule = Rule(flow.direction, ns, pod_labels, None, flow.dst.port, svc_id, pod_selector)
-            rule.link_flow(flow)
-            flow.link_rule(rule)
+    for conn in connections:
+        if conn.linked_rule is None:
+            # Some connections may already be linked in advance due to the searching process below
+            port = conn.svc_end.port if conn.direction == Direction.EGRESS else conn.inside_end.port
+            rule = Rule(conn.direction, conn.svc_end.ns, conn.svc_end.selectors, conn.inside_end.selectors, None,
+                        port, conn.inside_end.name)
+            rule.link_flow(conn)
+            conn.link_rule(rule)
             rules.append(rule)
-            if ALL_PODS:
-                for t_flow in connections:
-                    if t_flow == flow:
+            if GRANULARITY == Granularity.NAMESPACE:
+                rule.inside_name = NAMESPACE
+                # search all the flows to find flows that in the same ns, and link them to the same rule
+                for t_conn in connections:
+                    if t_conn == conn:
                         continue
-                    temp_svc = t_flow.src.svc_name if t_flow.direction == Direction.INGRESS else t_flow.dst.svc_name
-                    if t_flow.direction == flow.direction and t_flow.dst.port == rule.port and temp_svc == svc:
-                        rule.link_flow(t_flow)
-                        t_flow.link_rule(rule)
+                    t_port = t_conn.svc_end.port if t_conn.direction == Direction.EGRESS else t_conn.inside_end.port
+                    if t_conn.direction == conn.direction and t_port == port and t_conn.svc_end.end_id == conn.svc_end.end_id:
+                        rule.link_flow(t_conn)
+                        t_conn.link_rule(rule)
 
 
 def aggregate_conn(flows):
@@ -270,14 +287,20 @@ def aggregate_conn(flows):
         flow_dict = json.loads(flow)
         src = flow_dict["src"]
         dst = flow_dict["dst"]
-        if src["service"] and dst["service"]:
-            if src["service"]["namespace"] == NAMESPACE:
-                add_flow(flow_dict, Direction.EGRESS, src["service"]["id"], dst["service"]["id"])
-            if dst["service"]["namespace"] == NAMESPACE:
-                add_flow(flow_dict, Direction.INGRESS, src["service"]["id"], dst["service"]["id"])
-        else:
-            # Non-service traffic will be ignored
+        # Ignore all the flows related to DNS because we already (dis)allow DNS in the policy
+        if (src["service"] and src["service"]["name"] == "kube-dns") \
+                or (dst["service"] and dst["service"]["name"] == "kube-dns"):
             continue
+        four_tuple = flow_dict["tuple"]
+        gran_str = "pod" if GRANULARITY == Granularity.POD else "service"
+        if src[gran_str] and dst["service"] and src[gran_str]["namespace"] == NAMESPACE:
+            # Add egress flow
+            add_conn(Direction.EGRESS, src[gran_str], four_tuple["src_addr"], four_tuple["src_port"], dst["service"],
+                     four_tuple["dst_addr"], four_tuple["dst_port"])
+        if dst[gran_str] and src["service"] and dst[gran_str]["namespace"] == NAMESPACE:
+            # Add ingress flow
+            add_conn(Direction.INGRESS, dst[gran_str], four_tuple["dst_addr"], four_tuple["dst_port"], src["service"],
+                     four_tuple["src_addr"], four_tuple["src_port"])
     aggregate_rule()
     aggregate_policy()
 
@@ -296,26 +319,18 @@ def generate_policy_yaml():
     return policy_yamls
 
 
-def display(conn):
+def display():
     """
     Display a simple panel for user to select rules.
     This is just a temporary function.
     """
-    print(f"     {'Direction':20} {'Source':20} {'Destination':20} #")
-    for index, flow in enumerate(conn):
-        mark = "*" if flow.activated else " "
-        direction_str = "Ingress" if flow.direction == Direction.INGRESS else "Egress"
-        print(f"[{mark}]  {direction_str:20} {flow.src.svc_name:20} {flow.dst.svc_name:20} {index}")
-
-
-def get_connections():
-    """
-    Get the aggregated connections.
-
-    Returns:
-        A list of Connection objects
-    """
-    return connections
+    inside_resource_str = "Inside Pod" if GRANULARITY == Granularity.POD else "Inside Service"
+    column_width = 40 if GRANULARITY == Granularity.POD else 20
+    print(f"     {'Direction':20} {inside_resource_str:{column_width}} {'Outside Service':20} #")
+    for index, conn in enumerate(connections):
+        mark = "*" if conn.activated else " "
+        direction_str = "Ingress" if conn.direction == Direction.INGRESS else "Egress"
+        print(f"[{mark}]  {direction_str:20} {conn.inside_end.name:{column_width}} {conn.svc_end.name:20} {index}")
 
 
 def save_policies(policy_yamls):
@@ -323,28 +338,61 @@ def save_policies(policy_yamls):
     Save policy YAML files to local directory.
     This is just a temporary function.
     """
-    if not os.path.exists(f"./policies/{POLICY_NAME}"):
-        os.makedirs(f"./policies/{POLICY_NAME}")
+    policy_folder = FILE_PAR_DIR + f"/policies/{OUT_FOLDER_NAME}"
+    if not os.path.exists(policy_folder):
+        os.makedirs(policy_folder)
     else:
         # delete existing yaml files
-        for file in os.listdir(f"./policies/{POLICY_NAME}"):
-            os.remove(f"./policies/{POLICY_NAME}/{file}")
+        for file in os.listdir(policy_folder):
+            os.remove(f"{policy_folder}/{file}")
     for yaml_name, yaml_content in policy_yamls.items():
-        with open(f"./policies/{POLICY_NAME}/{yaml_name}.yaml", "w") as yaml_file:
+        with open(f"{policy_folder}/{yaml_name}.yaml", "w") as yaml_file:
             yaml_file.write(yaml_content)
 
 
 if __name__ == "__main__":
-    NAMESPACE = input("Enter namespace: ")
-    POLICY_NAME = input("Enter policy name: ")
-    ALL_PODS = input("All Pods? (\033[36my\033[0m/n): ") != "n"
-    ALLOW_DNS = input("Allow DNS? (\033[36my\033[0m/n): ") != "n"
-    with open("../data/flows.json", "r", encoding='utf8') as f:
+    arguments = argparse.ArgumentParser()
+    arguments.add_argument("-f", "--file", help="The file path of the flows",
+                           default=FILE_PAR_DIR + "/../data/flows.json")
+    arguments.add_argument("-o", "--output-folder", help="The name of the output folder")
+    arguments.add_argument("-n", "--namespace", help="The namespace of the policy")
+    arguments.add_argument("-g", "--granularity",
+                           help="The granularity of the policy. Possible values are ns/namespace, svc/service or pod")
+    arguments.add_argument("-a", "--all-policy", help="Automatically generate all possible policies",
+                           action="store_true")
+    arguments.add_argument("-v", "--version", help="Show version", action="version",
+                           version="Policy Generator v1.1")
+    arguments.add_argument("--forbid-dns", help="Forbid DNS traffic", action="store_true", default=False)
+    args = arguments.parse_args()
+
+    gran_s = input(
+        "Granularity (namespace/\033[36mservice\033[0m): ") if args.granularity is None else args.granularity
+    if gran_s == "namespace" or gran_s == "ns":
+        GRANULARITY = Granularity.NAMESPACE
+    elif gran_s == "service" or gran_s == "svc":
+        GRANULARITY = Granularity.SERVICE
+    elif gran_s == "pod":
+        GRANULARITY = Granularity.POD
+    else:
+        print("Invalid granularity")
+        exit(1)
+    NAMESPACE = input("Enter namespace: ") if args.namespace is None else args.namespace
+    OUT_FOLDER_NAME = input("Enter output folder name: ") if args.output_folder is None else args.output_folder
+    ALLOW_DNS = not args.forbid_dns
+    INPUT_FILE = args.file
+
+    with open(INPUT_FILE, "r", encoding='utf8') as f:
         records = f.readlines()
     aggregate_conn(records)
 
-    # Simple display loop for user to select rules.
-    display(get_connections())
+    if args.all_policy:
+        for connection in connections:
+            connection.activate()
+        save_policies(generate_policy_yaml())
+        exit(0)
+
+        # Simple display loop for user to select rules.
+    display()
     while True:
         command = input("Enter operation: ")
         op = command.split()
@@ -353,7 +401,6 @@ if __name__ == "__main__":
         elif op[0] == "c":
             connections[int(op[1])].deactivate()
         elif op[0] == "g":
-            yamls = generate_policy_yaml()
-            save_policies(yamls)
+            save_policies(generate_policy_yaml())
             break
-        display(get_connections())
+        display()

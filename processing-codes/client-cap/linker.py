@@ -9,9 +9,10 @@ import time
         [CONN] [eBPF] {hostname|timestamp|CPU|IPv4Event|pid|comm|Src|Dst|SrcPort|DstPort|NetNS|Fd}
 """
 
-LOG_FILE = "../data/records.log"
+LOG_FILE = "../data/flows.log"
 REPORT_FILE = "../data/report.json"
 services = {}
+deployments = {}
 endpoints = {}
 processes = {}
 containers = {}
@@ -142,6 +143,8 @@ def compress_pod(pod_info):
     if "parents" in pod_info and pod_info["parents"] is not None:
         if "service" in pod_info["parents"] and pod_info["parents"]["service"][0] in services:
             service_info = compress_info(services[pod_info["parents"]["service"][0]])
+        if "deployment" in pod_info["parents"] and pod_info["parents"]["deployment"][0] in services:
+            service_info = compress_info(services[pod_info["parents"]["deployment"][0]])
     pod_info = compress_info(pod_info)
     return {"pod": pod_info, "service": service_info}
 
@@ -158,6 +161,7 @@ def link_with_opt(records, report):
     global processes
     global containers
     global pods
+    global deployments
     process_to_pod = {}
     endpoints_to_pod = {}
     flows = []
@@ -196,6 +200,7 @@ def link_with_opt(records, report):
 
     processed_records = []
     services = report["Service"]["nodes"]
+    deployments = report["Deployment"]["nodes"]
 
     for flow in flows:
         hostname = flow.hostname
@@ -217,4 +222,5 @@ if __name__ == "__main__":
     with open(REPORT_FILE, "r", encoding='utf8') as f:
         data = json.load(f)
     rcd = link_with_opt(content, data)
-    print(len(rcd))
+    # print(len(rcd))
+    print('\n'.join(rcd))
