@@ -12,12 +12,11 @@ NAME_KEY = "kubernetes_name"
 NAMESPACE_KEY = "kubernetes_namespace"
 SERVICE_SELECTOR = "kubernetes_selector"
 K8S_NS_LABEL = "kubernetes.io/metadata.name"
+UUID_KEY = "kubernetes_cluster_uuid"
+IGNORED_LABELS = ["controller-revision-hash", "statefulset.kubernetes.io/pod-name"]
 
 
-class Pod:
-    """
-    Represents a pod.
-    """
+class ResourceInfo:
 
     def __init__(self, name, labels, namespace):
         self.name = name
@@ -33,17 +32,16 @@ class Policy:
     Represents a policy. Each policy object can generate a policy YAML file.
     """
 
-    def __init__(self, pod_name, pod_labels, namespace, deployment_name):
-        deployment_part = f"-{deployment_name}" if deployment_name else ""
-        self.name = f"{pod_name}{deployment_part}-{namespace}-networkpolicy"
-        self.template = templates.policy_template(self.name, namespace, pod_labels, False)
+    def __init__(self, resource_name, inside_labels, namespace, resource_type):
+        self.name = f"{resource_type.name.lower()}-{resource_name}-{namespace}"
+        self.template = templates.policy_template(self.name, namespace, inside_labels, False)
         self.rules = {}
 
-    def add_rule(self, direction, outside_pod_id, outside_pod_info, port):
-        if outside_pod_id not in self.rules:
-            self.rules[outside_pod_id] = Rule(direction, outside_pod_info, port)
-        elif port not in self.rules[outside_pod_id].ports:
-            self.rules[outside_pod_id].add_port(port)
+    def add_rule(self, direction, outside_resource_id, outside_resource_info, port):
+        if outside_resource_id not in self.rules:
+            self.rules[outside_resource_id] = Rule(direction, outside_resource_info, port)
+        elif port not in self.rules[outside_resource_id].ports:
+            self.rules[outside_resource_id].add_port(port)
 
     def generate_yaml(self):
         if not self.rules:
@@ -52,8 +50,8 @@ class Policy:
             is_ingress = rule.direction == Direction.INGRESS
             rule_frame = templates.rule_template(is_ingress)
             pod_selector = rule_frame["from" if is_ingress else "to"][0]
-            pod_selector["namespaceSelector"]["matchLabels"][K8S_NS_LABEL] = rule.outside_pod_ns
-            pod_selector["podSelector"]["matchLabels"] = rule.outside_pod_labels
+            pod_selector["namespaceSelector"]["matchLabels"][K8S_NS_LABEL] = rule.outside_resource_ns
+            pod_selector["podSelector"]["matchLabels"] = rule.outside_resource_labels
             for port in rule.ports:
                 rule_frame["ports"].append({"port": port})
             self.template["spec"]["ingress" if is_ingress else "egress"].append(rule_frame)
@@ -65,20 +63,25 @@ class Direction(Enum):
     EGRESS = 2
 
 
+class ResourceType(Enum):
+    POD = 1
+    DEPLOYMENT = 2
+
+
 class Rule:
 
-    def __init__(self, direction, outside_pod_info, port):
+    def __init__(self, direction, outside_resource_info, port):
         self.direction = direction
-        self.outside_pod_labels = outside_pod_info.labels
-        self.outside_pod_ns = outside_pod_info.namespace
+        self.outside_resource_labels = outside_resource_info.labels
+        self.outside_resource_ns = outside_resource_info.namespace
         self.ports = [port]
 
     def add_port(self, port):
         self.ports.append(port)
 
     def __eq__(self, other):
-        return self.direction == other.direction and self.outside_pod_labels == other.outside_pod_labels and \
-               self.outside_pod_ns == other.outside_pod_ns and self.ports == other.ports
+        return self.direction == other.direction and self.outside_resource_labels == other.outside_resource_labels and \
+               self.outside_resource_ns == other.outside_resource_ns and self.ports == other.ports
 
 
 def get_port_from_enp_id(enp_id):
@@ -99,15 +102,19 @@ def parse_label(latest_info):
     labels = {}
     for key, value in latest_info.items():
         if key.startswith(LABEL_PREFIX):
+            label_name = key[len(LABEL_PREFIX):]
+            if label_name in IGNORED_LABELS:
+                continue
             labels[key[len(LABEL_PREFIX):]] = value["value"]
     return labels
 
 
-def analyze_report(report):
+def analyze_report(report, uuid):
     process_to_pod = {}
     enp_to_pod = {}
     enp_to_adj = {}
-    pod_id_to_info = {}
+    pod_id_to_rsc_id = {}
+    resource_id_to_info = {}
 
     policies = {}
 
@@ -121,10 +128,12 @@ def analyze_report(report):
         parent_ctn_id = get_parent_id(proc_info, "container")
         if parent_ctn_id not in ctns:
             continue
-        parent_pod_id = get_parent_id(ctns[parent_ctn_id], "pod")
-        if parent_pod_id not in pods:
+        prt_pod_id = get_parent_id(ctns[parent_ctn_id], "pod")
+        if prt_pod_id not in pods:
             continue
-        process_to_pod[proc_id] = parent_pod_id
+        if pods[prt_pod_id]["latest"][UUID_KEY]["value"] != uuid:
+            continue
+        process_to_pod[proc_id] = prt_pod_id
 
     for enp_id, enp_info in enps.items():
         enp_to_adj[enp_id] = enp_info["adjacency"] if "adjacency" in enp_info else []
@@ -146,11 +155,17 @@ def analyze_report(report):
         namespace = pod_latest[NAMESPACE_KEY]["value"]
         pod_name = pod_latest[NAME_KEY]["value"]
         prt_dep_id = get_parent_id(pods[pod_id], "deployment")
-        prt_dep_name = None
+        resource_name = pod_name
+        resource_id = pod_id
+        resource_type = ResourceType.POD
         if prt_dep_id in deps and "latest" in deps[prt_dep_id]:
-            prt_dep_name = deps[prt_dep_id]["latest"]["kubernetes_name"]["value"]
-        pod_id_to_info[pod_id] = Pod(pod_name, labels, namespace)
-        policies[pod_id] = Policy(pod_name, labels, namespace, prt_dep_name)
+            resource_id = prt_dep_id
+            resource_type = ResourceType.DEPLOYMENT
+            resource_name = deps[prt_dep_id]["latest"]["kubernetes_name"]["value"]
+        pod_id_to_rsc_id[pod_id] = resource_id
+        if resource_id not in resource_id_to_info:
+            resource_id_to_info[resource_id] = ResourceInfo(resource_name, labels, namespace)
+        policies[resource_id] = Policy(resource_name, labels, namespace, resource_type)
 
     for enp_id, pod_id in enp_to_pod.items():
         adj_enps = enp_to_adj[enp_id]
@@ -160,9 +175,11 @@ def analyze_report(report):
             adj_pod_id = enp_to_pod[adj_enp_id]
             if adj_pod_id == pod_id:
                 continue
-            policies[pod_id].add_rule(Direction.EGRESS, adj_pod_id, pod_id_to_info[adj_pod_id],
+            adj_rsc_id = pod_id_to_rsc_id[adj_pod_id]
+            rsc_id = pod_id_to_rsc_id[pod_id]
+            policies[rsc_id].add_rule(Direction.EGRESS, adj_rsc_id, resource_id_to_info[adj_rsc_id],
                                       get_port_from_enp_id(adj_enp_id))
-            policies[adj_pod_id].add_rule(Direction.INGRESS, pod_id, pod_id_to_info[pod_id],
+            policies[adj_rsc_id].add_rule(Direction.INGRESS, rsc_id, resource_id_to_info[rsc_id],
                                           get_port_from_enp_id(adj_enp_id))
 
     policy_yamls = {}
@@ -182,7 +199,7 @@ if __name__ == "__main__":
     for file in os.listdir("policies"):
         os.remove(os.path.join("policies", file))
     report = json.load(open("report.json"))
-    files = analyze_report(report)
+    files = analyze_report(report, "33d1901faed141cf8ccacf5e94961607")
     for name, content in files.items():
         with open("policies/" + name + ".yaml", "w") as f:
             f.write(content)
