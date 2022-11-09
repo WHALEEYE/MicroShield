@@ -119,32 +119,6 @@ def assemble_proc_id(host_node_id, pid):
     return host_id + ";" + pid
 
 
-def find_parent_container_id(proc_info, procs):
-    failed_before = False
-    while True:
-        if get_parent_id(proc_info, "container") is not None:
-            if failed_before:
-                debug_info("Fallback applied when finding container ID: Go to Parent")
-            debug_info("Found parent container ID")
-            debug_info("---------------------------------------")
-            return get_parent_id(proc_info, "container")
-        debug_info(f"Failed to find parent container ID of {proc_info['id']}")
-        if "latest" not in proc_info:
-            debug_info("---------------------------------------")
-            return None
-        latest_info = proc_info["latest"]
-        if "ppid" not in latest_info or "host_node_id" not in latest_info:
-            debug_info("---------------------------------------")
-            return None
-        prt_proc_id = assemble_proc_id(latest_info["host_node_id"]["value"], latest_info["ppid"]["value"])
-        if prt_proc_id not in procs:
-            debug_info("---------------------------------------")
-            return None
-        proc_info = procs[prt_proc_id]
-        failed_before = True
-        debug_info(f"Go to Parent Proc: {prt_proc_id}")
-
-
 def analyze_report(report, uuid):
     process_to_pod = {}
     enp_to_pod = {}
@@ -161,7 +135,7 @@ def analyze_report(report, uuid):
     deps = report["Deployment"]["nodes"]
 
     for proc_id, proc_info in procs.items():
-        parent_ctn_id = find_parent_container_id(proc_info, procs)
+        parent_ctn_id = get_parent_id(proc_info, "container")
         if parent_ctn_id not in ctns:
             continue
         prt_pod_id = get_parent_id(ctns[parent_ctn_id], "pod")
@@ -225,7 +199,7 @@ def analyze_report(report, uuid):
 
 
 if __name__ == "__main__":
-    debug = True
+    debug = False
     start_time = time.time()
     # create folder named "policies" if not exist
     if not os.path.exists("policies"):
