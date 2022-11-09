@@ -16,10 +16,15 @@ UUID_KEY = "kubernetes_cluster_uuid"
 IGNORED_LABELS = ["controller-revision-hash", "statefulset.kubernetes.io/pod-name"]
 
 
+def debug_info(info):
+    if debug:
+        print(f"\033[35m[DEBUG] {info}\033[0m")
+
+
 class ResourceInfo:
 
-    def __init__(self, name, labels, namespace):
-        self.name = name
+    def __init__(self, resource_name, labels, namespace):
+        self.name = resource_name
         self.labels = labels
         self.namespace = namespace
 
@@ -109,6 +114,37 @@ def parse_label(latest_info):
     return labels
 
 
+def assemble_proc_id(host_node_id, pid):
+    host_id = host_node_id.split(";")[0]
+    return host_id + ";" + pid
+
+
+def find_parent_container_id(proc_info, procs):
+    failed_before = False
+    while True:
+        if get_parent_id(proc_info, "container") is not None:
+            if failed_before:
+                debug_info("Fallback applied when finding container ID: Go to Parent")
+            debug_info("Found parent container ID")
+            debug_info("---------------------------------------")
+            return get_parent_id(proc_info, "container")
+        debug_info(f"Failed to find parent container ID of {proc_info['id']}")
+        if "latest" not in proc_info:
+            debug_info("---------------------------------------")
+            return None
+        latest_info = proc_info["latest"]
+        if "ppid" not in latest_info or "host_node_id" not in latest_info:
+            debug_info("---------------------------------------")
+            return None
+        prt_proc_id = assemble_proc_id(latest_info["host_node_id"]["value"], latest_info["ppid"]["value"])
+        if prt_proc_id not in procs:
+            debug_info("---------------------------------------")
+            return None
+        proc_info = procs[prt_proc_id]
+        failed_before = True
+        debug_info(f"Go to Parent Proc: {prt_proc_id}")
+
+
 def analyze_report(report, uuid):
     process_to_pod = {}
     enp_to_pod = {}
@@ -125,7 +161,7 @@ def analyze_report(report, uuid):
     deps = report["Deployment"]["nodes"]
 
     for proc_id, proc_info in procs.items():
-        parent_ctn_id = get_parent_id(proc_info, "container")
+        parent_ctn_id = find_parent_container_id(proc_info, procs)
         if parent_ctn_id not in ctns:
             continue
         prt_pod_id = get_parent_id(ctns[parent_ctn_id], "pod")
@@ -142,9 +178,7 @@ def analyze_report(report, uuid):
         enp_latest = enp_info["latest"]
         if "host_node_id" not in enp_latest or "pid" not in enp_latest:
             continue
-        host_id = enp_latest["host_node_id"]["value"].split(";")[0]
-        pid = enp_latest["pid"]["value"]
-        proc_id = host_id + ";" + pid
+        proc_id = assemble_proc_id(enp_latest["host_node_id"]["value"], enp_latest["pid"]["value"])
         if proc_id not in process_to_pod:
             continue
         enp_to_pod[enp_id] = process_to_pod[proc_id]
@@ -161,7 +195,7 @@ def analyze_report(report, uuid):
         if prt_dep_id in deps and "latest" in deps[prt_dep_id]:
             resource_id = prt_dep_id
             resource_type = ResourceType.DEPLOYMENT
-            resource_name = deps[prt_dep_id]["latest"]["kubernetes_name"]["value"]
+            resource_name = deps[prt_dep_id]["latest"][NAME_KEY]["value"]
         pod_id_to_rsc_id[pod_id] = resource_id
         if resource_id not in resource_id_to_info:
             resource_id_to_info[resource_id] = ResourceInfo(resource_name, labels, namespace)
@@ -191,6 +225,7 @@ def analyze_report(report, uuid):
 
 
 if __name__ == "__main__":
+    debug = True
     start_time = time.time()
     # create folder named "policies" if not exist
     if not os.path.exists("policies"):
@@ -198,8 +233,8 @@ if __name__ == "__main__":
     # delete all files in the folder
     for file in os.listdir("policies"):
         os.remove(os.path.join("policies", file))
-    report = json.load(open("report.json"))
-    files = analyze_report(report, "33d1901faed141cf8ccacf5e94961607")
+    test_report = json.load(open("report.json"))
+    files = analyze_report(test_report, "33d1901faed141cf8ccacf5e94961607")
     for name, content in files.items():
         with open("policies/" + name + ".yaml", "w") as f:
             f.write(content)
