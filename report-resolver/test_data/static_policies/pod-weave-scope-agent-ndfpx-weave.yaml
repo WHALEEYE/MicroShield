@@ -1,0 +1,33 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pod-weave-scope-agent-ndfpx-weave
+  namespace: weave
+spec:
+  egress: []
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: weave
+      podSelector:
+        matchLabels:
+          app: weave-scope
+          name: weave-scope-cluster-agent
+          pod-template-hash: 6b899559d6
+          weave-cloud-component: scope
+          weave-scope-component: cluster-agent
+    ports:
+    - port: 6789
+    - port: 6783
+    - port: 4040
+  podSelector:
+    matchLabels:
+      app: weave-scope
+      name: weave-scope-agent
+      pod-template-generation: '1'
+      weave-cloud-component: scope
+      weave-scope-component: agent
+  policyTypes:
+  - Ingress
+  - Egress

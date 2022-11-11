@@ -2,3 +2,4 @@
 policies/
 processing-codes/data/
 **/__pycache__/
+abnormal_policies
