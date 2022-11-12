@@ -1,4 +1,3 @@
-import copy
 import json
 import os
 import time
@@ -15,18 +14,6 @@ SERVICE_SELECTOR = "kubernetes_selector"
 K8S_NS_LABEL = "kubernetes.io/metadata.name"
 UUID_KEY = "kubernetes_cluster_uuid"
 IGNORED_LABELS = ["controller-revision-hash", "statefulset.kubernetes.io/pod-name"]
-
-
-def debug_info(info):
-    if debug:
-        print(f"\033[35m[DEBUG] {info}\033[0m")
-
-
-def label_matched(conditions, labels):
-    for key, value in conditions.items():
-        if key not in labels or labels[key] != value:
-            return False
-    return True
 
 
 class ResourceInfo:
@@ -82,30 +69,6 @@ class Policy:
             else:
                 self.rules[rule_id] = rule
 
-    @staticmethod
-    def read_from_dict(policy_dict):
-        metadata = policy_dict["metadata"]
-        spec = policy_dict["spec"]
-        policy_name = metadata["name"]
-        resource_type = ResourceType[(policy_name.split("-")[0]).upper()]
-        policy = Policy("", spec["podSelector"]["matchLabels"], metadata["namespace"], resource_type)
-        policy.name = policy_name
-        for rule in spec["ingress"]:
-            for pod in rule["from"]:
-                pod_labels = pod["podSelector"]["matchLabels"]
-                pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
-                for port in rule["ports"]:
-                    policy.add_rule(Direction.INGRESS, policy_name, ResourceInfo("", pod_labels, pod_ns),
-                                    port["port"])
-        for rule in spec["egress"]:
-            for pod in rule["to"]:
-                pod_labels = pod["podSelector"]["matchLabels"]
-                pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
-                for port in rule["ports"]:
-                    policy.add_rule(Direction.EGRESS, policy_name, ResourceInfo("", pod_labels, pod_ns),
-                                    port["port"])
-        return policy
-
 
 class Direction(Enum):
     INGRESS = 1
@@ -132,10 +95,6 @@ class Rule:
     def __eq__(self, other):
         return self.direction == other.direction and self.outside_resource_labels == other.outside_resource_labels and \
                self.outside_resource_ns == other.outside_resource_ns and self.ports == other.ports
-
-    def rule_condition_matched(self, other_rule):
-        return label_matched(self.outside_resource_labels, other_rule.outside_resource_labels) and \
-               self.outside_resource_ns == other_rule.outside_resource_ns
 
 
 def get_port_from_enp_id(enp_id):
@@ -166,42 +125,6 @@ def parse_label(latest_info):
 def assemble_proc_id(host_node_id, pid):
     host_id = host_node_id.split(";")[0]
     return host_id + ";" + pid
-
-
-def compare(static_policy_dicts, dynamic_policies):
-    static_policies = {}
-    for policy_dict in static_policy_dicts:
-        policy = Policy.read_from_dict(policy_dict)
-        static_policies[policy.name] = policy
-
-    abnormal_policies = []
-
-    for policy_name, policy in dynamic_policies.items():
-        if not policy.rules:
-            continue
-        if policy_name not in static_policies:
-            abnormal_policies.append(policy)
-            continue
-        static_policy = static_policies[policy_name]
-        abnormal_policy = copy.deepcopy(policy)
-        abnormal_policy.rules = {}
-        for dynamic_rule in policy.rules.values():
-            matched_rule = None
-            for static_rule in static_policy.rules.values():
-                if dynamic_rule.rule_condition_matched(static_rule):
-                    matched_rule = static_rule
-                    break
-            if matched_rule is None:
-                abnormal_policy.rules[hash(str(dynamic_rule.outside_resource_labels))] = dynamic_rule
-                continue
-            abnormal_rule = copy.deepcopy(dynamic_rule)
-            abnormal_rule.ports = [port for port in dynamic_rule.ports if port not in matched_rule.ports]
-            if abnormal_rule.ports:
-                abnormal_policy.rules[hash(str(dynamic_rule.outside_resource_labels))] = abnormal_rule
-        if abnormal_policy.rules:
-            abnormal_policies.append(abnormal_policy)
-
-    return abnormal_policies
 
 
 def analyze_report(report, uuid):
@@ -302,22 +225,10 @@ def generate_dynamic_policies(report, uuid):
     output_policies_to_dir(policies.values(), "policies")
 
 
-def detect_abnormal_conn(static_policy_dicts, report, uuid):
-    policies = analyze_report(report, uuid)
-    abnormal_policies = compare(static_policy_dicts, policies)
-    output_policies_to_dir(abnormal_policies, "abnormal_policies")
-
-
 if __name__ == "__main__":
-    debug = False
     start_time = time.time()
     TEST_DATA_DIR = os.path.abspath(os.path.join(__file__, os.pardir, "test_data"))
-    # create folder named "policies" if not exist
     test_uuid = "33d1901faed141cf8ccacf5e94961607"
     test_report = json.load(open(f"{TEST_DATA_DIR}/report.json"))
-    test_static_policies = []
-    for test_static_file in os.listdir(f"{TEST_DATA_DIR}/static_policies"):
-        test_static_policies.append(
-            yaml.safe_load(open(os.path.join(f"{TEST_DATA_DIR}/static_policies", test_static_file))))
-    detect_abnormal_conn(test_static_policies, test_report, test_uuid)
+    generate_dynamic_policies(test_report, test_uuid)
     print("Time used: " + str(time.time() - start_time))
