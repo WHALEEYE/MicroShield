@@ -13,7 +13,9 @@ NAMESPACE_KEY = "kubernetes_namespace"
 SERVICE_SELECTOR = "kubernetes_selector"
 K8S_NS_LABEL = "kubernetes.io/metadata.name"
 UUID_KEY = "kubernetes_cluster_uuid"
-IGNORED_LABELS = ["controller-revision-hash", "statefulset.kubernetes.io/pod-name"]
+IGNORED_LABELS = {"controller-revision-hash", "statefulset.kubernetes.io/pod-name"}
+IGNORED_NAMESPACES = {"kube-system", "kube-public", "kube-node-lease", "cattle-system", "fleet-system", "ingress-nginx",
+                      "weave"}
 
 
 def label_matched(conditions, labels):
@@ -203,6 +205,9 @@ def compare(static_policy_dicts, report, uuid):
         if prt_pod_id not in pods:
             continue
         if pods[prt_pod_id]["latest"][UUID_KEY]["value"] != uuid:
+            continue
+        # ignore the pods with specific namespaces
+        if pods[prt_pod_id]["latest"][NAMESPACE_KEY]["value"] in IGNORED_NAMESPACES:
             continue
         proc_to_pod[proc_id] = prt_pod_id
 
