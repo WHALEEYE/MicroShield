@@ -67,24 +67,32 @@ class Policy:
     Represents a policy. Each policy object can generate a policy YAML file.
     """
 
-    def __init__(self, name, inside_labels, namespace):
+    def __init__(self, name, inside_labels, namespace, policy_types):
         self.name = name
         self.inside_labels = inside_labels
         self.namespace = namespace
         self.ingress_rules = []
         self.egress_rules = []
+        self.policy_types = policy_types
 
     def add_rule(self, direction, rule):
         rules = self.ingress_rules if direction == Direction.INGRESS else self.egress_rules
         rules.append(rule)
 
     def judge_flow(self, fr_rsc_info, to_rsc_info, port, direction):
-        rules = self.ingress_rules if direction == Direction.INGRESS else self.egress_rules
+        # Judge if the flow is matched by the policy
         inside_resource_info = to_rsc_info if direction == Direction.INGRESS else fr_rsc_info
-        outside_resource_info = fr_rsc_info if direction == Direction.INGRESS else to_rsc_info
         if not label_matched(self.inside_labels,
                              inside_resource_info.labels) and self.namespace == inside_resource_info.namespace:
             return False
+
+        # If the policy does not have this direction in policyTypes, the flow is allowed
+        if direction.name.lower() not in self.policy_types:
+            return True
+
+        # Judge if the flow is allowed by the rules
+        rules = self.ingress_rules if direction == Direction.INGRESS else self.egress_rules
+        outside_resource_info = fr_rsc_info if direction == Direction.INGRESS else to_rsc_info
         for rule in rules:
             if rule.judge_flow(outside_resource_info, port):
                 return True
@@ -95,29 +103,32 @@ class Policy:
         metadata = policy_dict["metadata"]
         spec = policy_dict["spec"]
         policy_name = metadata["name"]
-        policy = Policy(policy_name, spec["podSelector"]["matchLabels"], metadata["namespace"])
-        for rule in spec["ingress"]:
-            selectors = []
-            if "from" in rule:
-                for pod in rule["from"]:
-                    pod_labels = pod["podSelector"]["matchLabels"]
-                    pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
-                    selectors.append(Selector(pod_labels, pod_ns))
-            ports = []
-            if "ports" in rule:
-                ports = [port["port"] for port in rule["ports"]]
-            policy.add_rule(Direction.INGRESS, Rule(selectors, ports))
-        for rule in spec["egress"]:
-            selectors = []
-            if "to" in rule:
-                for pod in rule["to"]:
-                    pod_labels = pod["podSelector"]["matchLabels"]
-                    pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
-                    selectors.append(Selector(pod_labels, pod_ns))
-            ports = []
-            if "ports" in rule:
-                ports = [port["port"] for port in rule["ports"]]
-            policy.add_rule(Direction.EGRESS, Rule(selectors, ports))
+        policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]]
+        policy = Policy(policy_name, spec["podSelector"]["matchLabels"], metadata["namespace"], policy_types)
+        if "ingress" in spec:
+            for rule in spec["ingress"]:
+                selectors = []
+                if "from" in rule:
+                    for pod in rule["from"]:
+                        pod_labels = pod["podSelector"]["matchLabels"]
+                        pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
+                        selectors.append(Selector(pod_labels, pod_ns))
+                ports = []
+                if "ports" in rule:
+                    ports = [port["port"] for port in rule["ports"]]
+                policy.add_rule(Direction.INGRESS, Rule(selectors, ports))
+        if "egress" in spec:
+            for rule in spec["egress"]:
+                selectors = []
+                if "to" in rule:
+                    for pod in rule["to"]:
+                        pod_labels = pod["podSelector"]["matchLabels"]
+                        pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
+                        selectors.append(Selector(pod_labels, pod_ns))
+                ports = []
+                if "ports" in rule:
+                    ports = [port["port"] for port in rule["ports"]]
+                policy.add_rule(Direction.EGRESS, Rule(selectors, ports))
         return policy
 
 
@@ -138,12 +149,17 @@ class Rule:
         self.ports = ports
 
     def judge_flow(self, resource_info, port):
-        if not self.selectors and port in self.ports:
+        """
+        Judge if this rule allows the flow passes.
+        If the flow is allowed, return True.
+        If the flow is not allowed or not matched, return False.
+        """
+        if self.ports and port not in self.ports:
+            return False
+        if not self.selectors:
             return True
         for selector in self.selectors:
-            if not selector.match(resource_info):
-                continue
-            if port in self.ports or not self.ports:
+            if selector.match(resource_info):
                 return True
         return False
 
