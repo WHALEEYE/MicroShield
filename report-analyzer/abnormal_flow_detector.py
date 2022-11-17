@@ -14,8 +14,6 @@ SERVICE_SELECTOR = "kubernetes_selector"
 K8S_NS_LABEL = "kubernetes.io/metadata.name"
 UUID_KEY = "kubernetes_cluster_uuid"
 IGNORED_LABELS = {"controller-revision-hash", "statefulset.kubernetes.io/pod-name"}
-IGNORED_NAMESPACES = {"kube-system", "kube-public", "kube-node-lease", "cattle-system", "fleet-system", "ingress-nginx",
-                      "weave"}
 
 
 def label_matched(conditions, labels):
@@ -194,7 +192,7 @@ def assemble_proc_id(host_node_id, pid):
     return host_id + ";" + pid
 
 
-def compare(static_policy_dicts, report, uuid):
+def compare(static_policy_dicts, report, uuid, ignored_namespaces):
     proc_to_pod = {}
     enp_to_pod = {}
     enp_to_adj = {}
@@ -223,7 +221,7 @@ def compare(static_policy_dicts, report, uuid):
         if pods[prt_pod_id]["latest"][UUID_KEY]["value"] != uuid:
             continue
         # ignore the pods with specific namespaces
-        if pods[prt_pod_id]["latest"][NAMESPACE_KEY]["value"] in IGNORED_NAMESPACES:
+        if pods[prt_pod_id]["latest"][NAMESPACE_KEY]["value"] in ignored_namespaces:
             continue
         proc_to_pod[proc_id] = prt_pod_id
 
@@ -305,20 +303,25 @@ def compare(static_policy_dicts, report, uuid):
     return abnormal_flows
 
 
-if __name__ == "__main__":
-    test_logger = logger.Logger(logger.Mode.DEBUG)
-    start_time = time.time()
-    TEST_DATA_DIR = os.path.abspath(os.path.join(__file__, os.pardir, "test_data"))
-    test_uuid = "33d1901faed141cf8ccacf5e94961607"
-    test_report = json.load(open(f"{TEST_DATA_DIR}/report.json"))
-    test_static_policies = []
-    for test_static_file in os.listdir(f"{TEST_DATA_DIR}/static_policies"):
-        test_static_policies.append(
-            yaml.safe_load(open(os.path.join(f"{TEST_DATA_DIR}/static_policies", test_static_file))))
-    test_abnormal_flows = compare(test_static_policies, test_report, test_uuid)
+def example_use_case():
+    data_dir = os.path.abspath(os.path.join(__file__, os.pardir, "test_data"))
+    ignored_namespaces = {"kube-system", "kube-public", "kube-node-lease", "cattle-system", "fleet-system",
+                          "ingress-nginx", "weave", "calico-system", "calico-apiserver"}
+    uuid = "33d1901faed141cf8ccacf5e94961607"
+    report = json.load(open(f"{data_dir}/report.json"))
+    static_policies = []
+    for test_static_file in os.listdir(f"{data_dir}/static_policies"):
+        static_policies.append(
+            yaml.safe_load(open(os.path.join(f"{data_dir}/static_policies", test_static_file))))
+    abnormal_flows = compare(static_policies, report, uuid, ignored_namespaces)
 
     # print the abnormal flows for test
-    for test_abnormal_flow in test_abnormal_flows:
-        test_logger.debug(test_abnormal_flow)
+    for abnormal_flow in abnormal_flows:
+        logger.debug(abnormal_flow)
 
-    test_logger.info("Time used: " + str(time.time() - start_time))
+
+if __name__ == "__main__":
+    logger = logger.Logger(logger.Mode.DEBUG)
+    start_time = time.time()
+    example_use_case()
+    logger.info("Time used: " + str(time.time() - start_time))
