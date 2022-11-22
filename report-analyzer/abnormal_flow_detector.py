@@ -81,7 +81,7 @@ class Policy:
         # Judge if the flow is matched by the policy
         inside_resource_info = to_rsc_info if direction == Direction.INGRESS else fr_rsc_info
         if not label_matched(self.inside_labels,
-                             inside_resource_info.labels) and self.namespace == inside_resource_info.namespace:
+                             inside_resource_info.labels) or self.namespace != inside_resource_info.namespace:
             return False
 
         # If the policy does not have this direction in policyTypes, the flow is allowed
@@ -102,7 +102,10 @@ class Policy:
         spec = policy_dict["spec"]
         policy_name = metadata["name"]
         policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]]
-        policy = Policy(policy_name, spec["podSelector"]["matchLabels"], metadata["namespace"], policy_types)
+        policy_selector = {}
+        if "podSelector" in spec:
+            policy_selector = spec["podSelector"]["matchLabels"]
+        policy = Policy(policy_name, policy_selector, metadata["namespace"], policy_types)
         if "ingress" in spec:
             for rule in spec["ingress"]:
                 selectors = []
