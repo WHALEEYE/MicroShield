@@ -5,7 +5,7 @@ from enum import Enum
 
 import yaml
 
-import logger
+from .logger import Logger, Mode
 
 LABEL_PREFIX = "kubernetes_labels_"
 NAME_KEY = "kubernetes_name"
@@ -324,7 +324,7 @@ def example_use_case():
 
 
 if __name__ == "__main__":
-    logger = logger.Logger(logger.Mode.DEBUG)
+    logger = Logger(Mode.DEBUG)
     start_time = time.time()
     example_use_case()
     logger.info("Time used: " + str(time.time() - start_time))
