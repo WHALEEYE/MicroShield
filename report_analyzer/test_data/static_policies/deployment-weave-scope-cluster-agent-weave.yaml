@@ -16,7 +16,7 @@ spec:
           app: weave-scope
           name: weave-scope-agent
           pod-template-generation: '1'
-          weave-cloud-component: scope-fake
+          weave-cloud-component: scope
           weave-scope-component: agent
   ingress: []
   podSelector:

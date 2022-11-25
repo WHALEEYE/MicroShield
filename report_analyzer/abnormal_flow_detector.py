@@ -41,11 +41,11 @@ class Flow:
 
 class Selector:
     def __init__(self, labels, namespace):
-        self.selector = labels
+        self.labels = labels
         self.namespace = namespace
 
     def match(self, resource_info):
-        return label_matched(self.selector, resource_info.labels) and self.namespace == resource_info.namespace
+        return label_matched(self.labels, resource_info.labels) and self.namespace == resource_info.namespace
 
 
 class ResourceInfo:
@@ -67,8 +67,7 @@ class Policy:
 
     def __init__(self, name, inside_labels, namespace, policy_types):
         self.name = name
-        self.inside_labels = inside_labels
-        self.namespace = namespace
+        self.inside_selector = Selector(inside_labels, namespace)
         self.ingress_rules = []
         self.egress_rules = []
         self.policy_types = policy_types
@@ -80,8 +79,7 @@ class Policy:
     def judge_flow(self, fr_rsc_info, to_rsc_info, port, direction):
         # Judge if the flow is matched by the policy
         inside_resource_info = to_rsc_info if direction == Direction.INGRESS else fr_rsc_info
-        if not label_matched(self.inside_labels,
-                             inside_resource_info.labels) or self.namespace != inside_resource_info.namespace:
+        if not self.inside_selector.match(inside_resource_info):
             return False
 
         # If the policy does not have this direction in policyTypes, the flow is allowed
@@ -102,10 +100,10 @@ class Policy:
         spec = policy_dict["spec"]
         policy_name = metadata["name"]
         policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]]
-        policy_selector = {}
+        inside_labels = {}
         if "podSelector" in spec:
-            policy_selector = spec["podSelector"]["matchLabels"]
-        policy = Policy(policy_name, policy_selector, metadata["namespace"], policy_types)
+            inside_labels = spec["podSelector"]["matchLabels"]
+        policy = Policy(policy_name, inside_labels, metadata["namespace"], policy_types)
         if "ingress" in spec:
             for rule in spec["ingress"]:
                 selectors = []
