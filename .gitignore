@@ -1,5 +1,11 @@
 .idea/
-policies/
+report_analyzer/policies/
+processing-codes/policy-generator/policies/
 processing-codes/data/
 **/__pycache__/
 report_analyzer/test_flow.txt
+
+evaluation/outs
+evaluation/all_ports
+evaluation/dynamic_policy_generator.py
+evaluation/reports

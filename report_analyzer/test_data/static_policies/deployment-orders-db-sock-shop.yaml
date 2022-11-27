@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deployment-orders-db-sock-shop
+  namespace: sock-shop
+spec:
+  egress: []
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: sock-shop
+      podSelector:
+        matchLabels:
+          name: orders
+          pod-template-hash: 5d8557969c
+    ports:
+    - port: 27017
+  podSelector:
+    matchLabels:
+      name: orders-db
+      pod-template-hash: 784fc9d845
+  policyTypes:
+  - Ingress
+  - Egress

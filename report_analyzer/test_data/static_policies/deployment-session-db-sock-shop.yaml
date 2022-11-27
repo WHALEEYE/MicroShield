@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deployment-session-db-sock-shop
+  namespace: sock-shop
+spec:
+  egress: []
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: sock-shop
+      podSelector:
+        matchLabels:
+          name: front-end
+          pod-template-hash: 6585d48b5c
+    ports:
+    - port: 6379
+  podSelector:
+    matchLabels:
+      name: session-db
+      pod-template-hash: 5b7f5f6c47
+  policyTypes:
+  - Ingress
+  - Egress

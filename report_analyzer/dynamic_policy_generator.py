@@ -127,7 +127,7 @@ def assemble_proc_id(host_node_id, pid):
     return host_id + ";" + pid
 
 
-def analyze_report(report, uuid):
+def analyze_report(report, uuid, ignored_namespaces):
     process_to_pod = {}
     enp_to_pod = {}
     enp_to_adj = {}
@@ -149,7 +149,12 @@ def analyze_report(report, uuid):
         prt_pod_id = get_parent_id(ctns[parent_ctn_id], "pod")
         if prt_pod_id not in pods:
             continue
-        if pods[prt_pod_id]["latest"][UUID_KEY]["value"] != uuid:
+        latest_info = pods[prt_pod_id]["latest"]
+        # If multi-cluster is enabled, only consider the pods in the specified cluster
+        if uuid is not None and latest_info[UUID_KEY]["value"] != uuid:
+            continue
+        # Ignore the pods with specific namespaces
+        if ignored_namespaces is not None and latest_info[NAMESPACE_KEY]["value"] in ignored_namespaces:
             continue
         process_to_pod[proc_id] = prt_pod_id
 
@@ -220,15 +225,17 @@ def output_policies_to_dir(policies, dir_path):
                 f.write(yaml_content)
 
 
-def generate_dynamic_policies(report, uuid):
-    policies = analyze_report(report, uuid)
+def generate_dynamic_policies(report, uuid, ignored_namespaces):
+    policies = analyze_report(report, uuid, ignored_namespaces)
     output_policies_to_dir(policies.values(), "policies")
 
 
 if __name__ == "__main__":
     start_time = time.time()
     TEST_DATA_DIR = os.path.abspath(os.path.join(__file__, os.pardir, "test_data"))
+    test_ignored_namespaces = {"kube-system", "kube-public", "kube-node-lease", "cattle-system", "fleet-system",
+                               "ingress-nginx", "weave", "calico-system", "calico-apiserver"}
     test_uuid = "33d1901faed141cf8ccacf5e94961607"
     test_report = json.load(open(f"{TEST_DATA_DIR}/report.json"))
-    generate_dynamic_policies(test_report, test_uuid)
+    generate_dynamic_policies(test_report, None, test_ignored_namespaces)
     print("Time used: " + str(time.time() - start_time))

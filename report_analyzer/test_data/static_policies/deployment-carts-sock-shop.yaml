@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deployment-carts-sock-shop
+  namespace: sock-shop
+spec:
+  egress:
+  - ports:
+    - port: 27017
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: sock-shop
+      podSelector:
+        matchLabels:
+          name: carts-db
+          pod-template-hash: 775b544b45
+  ingress: []
+  podSelector:
+    matchLabels:
+      name: carts
+      pod-template-hash: 76dd6bf8f9
+  policyTypes:
+  - Ingress
+  - Egress
