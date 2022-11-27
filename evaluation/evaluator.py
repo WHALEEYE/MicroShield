@@ -345,20 +345,15 @@ def parse_output_files(output_dir):
             lines = f.read().splitlines()
         key_list = lines[0].split()
         key = (key_list[0].strip(), key_list[1].strip(), key_list[2].strip())
-        line_no = 1
-        while line_no < len(lines):
-            line = lines[line_no]
+        for line in lines[1:]:
             if not line:
-                line_no += 1
                 continue
             if "open" in line:
                 open_ports.add(int(line.split()[0]))
             elif "timed out" in line:
                 forbidden_ports.add(int(line.split()[0]))
-                line_no += 1
             else:
-                closed_ports.add(int(line.split()[0]))
-            line_no += 1
+                closed_ports.add(int(line.strip()))
         flows[key] = (open_ports, closed_ports, forbidden_ports)
 
     return flows

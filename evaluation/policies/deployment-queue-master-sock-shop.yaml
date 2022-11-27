@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deployment-queue-master-sock-shop
+  namespace: sock-shop
+spec:
+  egress:
+  - ports:
+    - port: 5672
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: sock-shop
+      podSelector:
+        matchLabels:
+          name: rabbitmq
+  ingress: []
+  podSelector:
+    matchLabels:
+      name: queue-master
+  policyTypes:
+  - Ingress
+  - Egress
