@@ -303,18 +303,24 @@ def evaluate_one_pod_ip(namespace, name, ips, is_exp, finished_num, lock):
         lock.release()
 
 
-def evaluate_all_pods_multiprocess(pod_infos, is_exp, less_process):
+def evaluate_all_pods_multiprocess(pod_infos, is_exp):
     all_ips = {pod_info.ip_address for pod_info in pod_infos}
+
+    # set ip pool size
+    if pn == 0:
+        ip_pool_size = 1
+    elif pn == -1:
+        ip_pool_size = len(all_ips) - 1
+    else:
+        ip_pool_size = (len(all_ips) - 1) // (pn // len(pod_infos))
+
     finished_num = multiprocessing.Value(ctypes.c_int, 0)
     processes = []
     lock = multiprocessing.Lock()
     for pod_info in pod_infos:
-        ips_raw = all_ips - {pod_info.ip_address}
-        if less_process:
-            ips_set = [ips_raw]
-        else:
-            ips_set = [{ip} for ip in ips_raw]
-        for ips in ips_set:
+        ip_pool = list(all_ips - {pod_info.ip_address})
+        for index in range(0, len(ip_pool), ip_pool_size):
+            ips = ip_pool[index:index + ip_pool_size]
             p = multiprocessing.Process(target=evaluate_one_pod_ip,
                                         args=(pod_info.namespace, pod_info.name, ips, is_exp, finished_num, lock))
             processes.append(p)
@@ -389,6 +395,32 @@ def calculate_statistics(allowed_flows, control_flows, exp_flows):
     return EvaluationReport(true_positive_rate, true_negative_rate, redundancy_rate, rejection_rate)
 
 
+def collect_evaluation_results(pod_id_to_info, outs_dir):
+    finished = 0
+    total = len(pod_id_to_info)
+    for info in pod_id_to_info.values():
+        loading = ["|", "/", "-", "\\"][finished % 4]
+        print(f"\r{loading} Finished: \033[1m{finished}/{total}\033[0m", end="")
+        os.system(f"kubectl cp {info.namespace}/{info.name}:outs {outs_dir} -c debugger")
+        finished += 1
+    finish_icon = "✓"
+    print(f"\r{finish_icon} Finished: \033[1m{finished}/{total}\033[0m")
+
+
+def data_preparation(pod_id_to_info, root_dir):
+    finished = 0
+    total = len(pod_id_to_info)
+    for info in pod_id_to_info.values():
+        loading = ["|", "/", "-", "\\"][finished % 4]
+        print(f"\r{loading} Finished: \033[1m{finished}/{total}\033[0m", end="")
+        os.system(f"kubectl cp {root_dir}/all_ports {info.namespace}/{info.name}:/ -c debugger")
+        os.system(f"kubectl cp {root_dir}/evaluation_script.sh {info.namespace}/{info.name}:/ -c debugger")
+        os.system(f"kubectl exec -n {info.namespace} {info.name} -c debugger -- rm -rf /outs")
+        finished += 1
+    finish_icon = "✓"
+    print(f"\r{finish_icon} Finished: \033[1m{finished}/{total}\033[0m")
+
+
 def evaluate():
     # paths that will be used
     root_dir = os.path.abspath(os.path.join(__file__, os.pardir))
@@ -432,24 +464,28 @@ def evaluate():
     with open(f"{root_dir}/all_ports", "w") as f:
         f.write(" ".join([str(port) for port in all_ports]))
 
-    if args.report_only:
-        print("\033[33mSkipped debug container setup.\033[0m")
-        print("\033[33mSkipped evaluation.\033[0m")
+    if args.report_only or args.skip_injection:
+        print("\033[33mSkipped debug container setup.\n\033[0m")
     else:
-        # create debugger containers in pods
+        # inject debugger containers to pods
         print("\033[33mDeploying debug containers...\033[0m")
         for info in pod_id_to_info.values():
             os.system(f"kubectl debug {info.name} -n {info.namespace} --image=busybox -c debugger -- sleep 10000000000")
-            # copy evaluation shell scripts to debuggers
-            os.system(f"kubectl cp {root_dir}/all_ports {info.namespace}/{info.name}:/ -c debugger")
-            os.system(f"kubectl cp {root_dir}/evaluation_script.sh {info.namespace}/{info.name}:/ -c debugger")
-            os.system(f"kubectl exec -n {info.namespace} {info.name} -c debugger -- rm -rf /outs")
         print("\033[32mAll debug containers are deployed, but it may take some time to set up.\033[0m")
-        input("\033[1mPress Enter When All Debuggers Are Ready.\033[0m")
+        input("\033[1mPress Enter When All Debuggers Are in RUNNING state.\033[0m")
+
+    if args.report_only:
+        print("\033[33mSkipped data preparation.\033[0m\n")
+        print("\033[33mSkipped evaluation.\033[0m\n")
+    else:
+        # prepare script and data for debugger containers
+        print("\033[33mPreparing data in debugger containers...\033[0m")
+        data_preparation(pod_id_to_info, root_dir)
+        print("\033[32mData in debugger containers are prepared.\033[0m\n")
 
         # multiprocessing control evaluation
-        print("\n\033[33mControl evaluation started...\033[0m")
-        evaluate_all_pods_multiprocess(pod_id_to_info.values(), False, args.less_process)
+        print("\033[33mControl evaluation started...\033[0m")
+        evaluate_all_pods_multiprocess(pod_id_to_info.values(), False)
         print("\033[32mControl evaluation finished.\033[0m\n")
 
         # apply policies
@@ -459,7 +495,7 @@ def evaluate():
 
         # multiprocessing experimental evaluation
         print("\033[33mExperimental evaluation started...\033[0m")
-        evaluate_all_pods_multiprocess(pod_id_to_info.values(), True, args.less_process)
+        evaluate_all_pods_multiprocess(pod_id_to_info.values(), True)
         print("\033[32mExperimental evaluation finished.\033[0m\n")
 
         # delete policies
@@ -468,8 +504,9 @@ def evaluate():
         print("\033[32mPolicies deleted.\033[0m\n")
 
         # collect evaluation results
-        for info in pod_id_to_info.values():
-            os.system(f"kubectl cp {info.namespace}/{info.name}:outs {outs_dir} -c debugger")
+        print("\033[33mCollecting evaluation results...\033[0m")
+        collect_evaluation_results(pod_id_to_info, outs_dir)
+        print("\033[32mEvaluation results collected.\033[0m\n")
 
         print("\033[;32;1mALL DONE!\033[0m\n")
 
@@ -491,10 +528,22 @@ def evaluate():
 if __name__ == "__main__":
     arguments = argparse.ArgumentParser()
     arguments.add_argument("-r", "--report-only",
-                           help="Only generate reports. This should not be used for the first time or at long time after last evaluation.",
+                           help="Only generate reports. "
+                                "This should not be used for the first time or at long time after last evaluation.",
                            action="store_true", default=False)
-    arguments.add_argument("-l", "--less-process",
-                           help="Limit the number of processes to run at the same time.",
+    arguments.add_argument("-s", "--skip-injection",
+                           help="Skip the injection of debug containers. This should not used for the first time.",
                            action="store_true", default=False)
+    arguments.add_argument("-p", "--process-number",
+                           help="Number of processes. Max (Default) is [pod_num * (pod_num - 1) * port_num]. "
+                                "Min is [pod_num]. You can specify a number between them or input max/min. "
+                                "Note that the actual process number may be slightly different.",
+                           default="max")
     args = arguments.parse_args()
+    if args.process_number == "max":
+        pn = 0
+    elif args.process_number == "min":
+        pn = -1
+    else:
+        pn = int(args.process_number)
     evaluate()

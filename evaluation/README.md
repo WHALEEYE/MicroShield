@@ -30,8 +30,6 @@ Also, in `template.py`, you can change the ports that you want to test. The defa
 
 ### Step 4. Run evaluator
 
-> There are some arguments for `evaluator.py`, but you should not pass them if it's your first time to use this.
-
 After running, the evaluator will inject debug containers named `debugger` to every pod that in specified/not ignored namespaces.
 
 Make sure that all the injected containers are in `Running` state, then press enter. You can check the state of these containers with command `kubectl describe [pod_name]`.
@@ -39,4 +37,8 @@ Make sure that all the injected containers are in `Running` state, then press en
 Then the evaluator will start to test connections and it might take a long time.
 
 > Be easy, its fully automatic. You just need to wait.
+
+### Arguments
+
+For command line arguments, you can use `-h` flag for more information.
 
