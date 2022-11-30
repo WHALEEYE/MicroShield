@@ -165,7 +165,6 @@ class EvaluationReport:
     def __str__(self):
         return f"True positive rate: {self.true_positive_rate}\n" \
                f"True negative rate: {self.true_negative_rate}\n" \
-               f"Redundancy rate: {self.redundancy_rate}\n" \
                f"Rejection rate: {self.rejection_rate}\n"
 
 
@@ -310,17 +309,16 @@ def evaluate_all_pods_multiprocess(pod_infos, is_exp):
     if pn == 0:
         ip_pool_size = 1
     elif pn == -1:
-        ip_pool_size = len(all_ips) - 1
+        ip_pool_size = len(all_ips)
     else:
-        ip_pool_size = (len(all_ips) - 1) // (pn // len(pod_infos))
+        ip_pool_size = len(all_ips) // (pn // len(pod_infos))
 
     finished_num = multiprocessing.Value(ctypes.c_int, 0)
     processes = []
     lock = multiprocessing.Lock()
     for pod_info in pod_infos:
-        ip_pool = list(all_ips - {pod_info.ip_address})
-        for index in range(0, len(ip_pool), ip_pool_size):
-            ips = ip_pool[index:index + ip_pool_size]
+        for index in range(0, len(all_ips), ip_pool_size):
+            ips = all_ips[index:index + ip_pool_size]
             p = multiprocessing.Process(target=evaluate_one_pod_ip,
                                         args=(pod_info.namespace, pod_info.name, ips, is_exp, finished_num, lock))
             processes.append(p)
@@ -535,7 +533,7 @@ if __name__ == "__main__":
                            help="Skip the injection of debug containers. This should not used for the first time.",
                            action="store_true", default=False)
     arguments.add_argument("-p", "--process-number",
-                           help="Number of processes. Max (Default) is [pod_num * (pod_num - 1) * port_num]. "
+                           help="Number of processes. Max (Default) is [pod_num * (pod_num - 1)]. "
                                 "Min is [pod_num]. You can specify a number between them or input max/min. "
                                 "Note that the actual process number may be slightly different.",
                            default="max")
