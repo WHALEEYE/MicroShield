@@ -303,7 +303,7 @@ def evaluate_one_pod_ip(namespace, name, ips, is_exp, finished_num, lock):
 
 
 def evaluate_all_pods_multiprocess(pod_infos, is_exp):
-    all_ips = {pod_info.ip_address for pod_info in pod_infos}
+    all_ips = [pod_info.ip_address for pod_info in pod_infos]
 
     # set ip pool size
     if pn == 0:
