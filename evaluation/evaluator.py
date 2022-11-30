@@ -385,10 +385,10 @@ def calculate_statistics(allowed_flows, control_flows, exp_flows):
         true_negative_count += len(forbidden_ports - allowed_ports)
         positive_count += len(positive_set)
         true_positive_count += len(positive_set & allowed_ports)
-    true_positive_rate = true_positive_count / positive_count
-    true_negative_rate = true_negative_count / negative_count
-    redundancy_rate = redundant_count / allowed_count
-    rejection_rate = rejected_count / open_count
+    true_positive_rate = true_positive_count / positive_count if positive_count > 0 else 1
+    true_negative_rate = true_negative_count / negative_count if negative_count > 0 else 1
+    redundancy_rate = redundant_count / allowed_count if allowed_count > 0 else 0
+    rejection_rate = rejected_count / open_count if open_count > 0 else 0
 
     return EvaluationReport(true_positive_rate, true_negative_rate, redundancy_rate, rejection_rate)
 
