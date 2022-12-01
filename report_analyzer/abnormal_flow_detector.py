@@ -100,33 +100,29 @@ class Policy:
         spec = policy_dict["spec"]
         policy_name = metadata["name"]
         policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]]
-        inside_labels = {}
-        if "podSelector" in spec:
-            inside_labels = spec["podSelector"]["matchLabels"]
-        policy = Policy(policy_name, inside_labels, metadata["namespace"], policy_types)
+        policy_selector = spec["podSelector"]["matchLabels"] if "podSelector" in spec else {}
+        policy = Policy(policy_name, policy_selector, metadata["namespace"], policy_types)
         if "ingress" in spec:
             for rule in spec["ingress"]:
                 selectors = []
                 if "from" in rule:
                     for pod in rule["from"]:
-                        pod_labels = pod["podSelector"]["matchLabels"]
-                        pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
+                        pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
+                        pod_ns = pod["namespaceSelector"]["matchLabels"][
+                            K8S_NS_LABEL] if "namespaceSelector" in pod else ""
                         selectors.append(Selector(pod_labels, pod_ns))
-                ports = []
-                if "ports" in rule:
-                    ports = [port["port"] for port in rule["ports"]]
+                ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.INGRESS, Rule(selectors, ports))
         if "egress" in spec:
             for rule in spec["egress"]:
                 selectors = []
                 if "to" in rule:
                     for pod in rule["to"]:
-                        pod_labels = pod["podSelector"]["matchLabels"]
-                        pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
+                        pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
+                        pod_ns = pod["namespaceSelector"]["matchLabels"][
+                            K8S_NS_LABEL] if "namespaceSelector" in pod else ""
                         selectors.append(Selector(pod_labels, pod_ns))
-                ports = []
-                if "ports" in rule:
-                    ports = [port["port"] for port in rule["ports"]]
+                ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.EGRESS, Rule(selectors, ports))
         return policy
 

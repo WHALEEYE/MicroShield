@@ -104,33 +104,29 @@ class Policy:
         spec = policy_dict["spec"]
         policy_name = metadata["name"]
         policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]]
-        policy_selector = {}
-        if "podSelector" in spec:
-            policy_selector = spec["podSelector"]["matchLabels"]
+        policy_selector = spec["podSelector"]["matchLabels"] if "podSelector" in spec else {}
         policy = Policy(policy_name, policy_selector, metadata["namespace"], policy_types)
         if "ingress" in spec:
             for rule in spec["ingress"]:
                 selectors = []
                 if "from" in rule:
                     for pod in rule["from"]:
-                        pod_labels = pod["podSelector"]["matchLabels"]
-                        pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
+                        pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
+                        pod_ns = pod["namespaceSelector"]["matchLabels"][
+                            K8S_NS_LABEL] if "namespaceSelector" in pod else ""
                         selectors.append(Selector(pod_labels, pod_ns))
-                ports = []
-                if "ports" in rule:
-                    ports = [port["port"] for port in rule["ports"]]
+                ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.INGRESS, Rule(selectors, ports))
         if "egress" in spec:
             for rule in spec["egress"]:
                 selectors = []
                 if "to" in rule:
                     for pod in rule["to"]:
-                        pod_labels = pod["podSelector"]["matchLabels"]
-                        pod_ns = pod["namespaceSelector"]["matchLabels"][K8S_NS_LABEL]
+                        pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
+                        pod_ns = pod["namespaceSelector"]["matchLabels"][
+                            K8S_NS_LABEL] if "namespaceSelector" in pod else ""
                         selectors.append(Selector(pod_labels, pod_ns))
-                ports = []
-                if "ports" in rule:
-                    ports = [port["port"] for port in rule["ports"]]
+                ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.EGRESS, Rule(selectors, ports))
         return policy
 
@@ -156,15 +152,14 @@ class Rule:
 
 
 class EvaluationReport:
-    def __init__(self, true_positive_rate, true_negative_rate, redundancy_rate, rejection_rate):
+    def __init__(self, true_positive_rate, true_negative_rate, rejection_rate):
         self.true_positive_rate = true_positive_rate
         self.true_negative_rate = true_negative_rate
-        self.redundancy_rate = redundancy_rate
         self.rejection_rate = rejection_rate
 
     def __str__(self):
         return f"True positive rate: {self.true_positive_rate}\n" \
-               f"True negative rate: {self.true_negative_rate}\n" \
+               f"False negative rate: {self.true_negative_rate}\n" \
                f"Rejection rate: {self.rejection_rate}\n"
 
 
@@ -214,7 +209,7 @@ def get_pod_infos(report, uuid=None, ignored_namespaces=None, namespace=None):
     return pod_id_to_info
 
 
-def get_allowed_flows(policy_dicts, pod_id_to_info):
+def get_policy_flows(policy_dicts, pod_id_to_info):
     all_ports = preset.get_preset_ports()
 
     # Read all policies into a dictionary {policy_name: policy_object}
@@ -273,9 +268,9 @@ def get_allowed_flows(policy_dicts, pod_id_to_info):
                     ports = set(rule.ports) if rule.ports else {-1}
                     allowed_flows[(inside_pod_id, pod_id)][1] |= ports
 
-    # use a dictionary to store the possible flows of each pod
-    # {(src_pod_name, src_pod_ns, dst_pod_ip): {allowed_ports}}
-    all_allowed_flows = {}
+    # use a dictionary to store the flows in policies of each pod
+    # {(src_pod_name, src_pod_ns, dst_pod_ip): (allowed_ports, forbidden_ports)}
+    policy_flows = {}
 
     for (src_pod_id, dst_pod_id), (ingress_ports, egress_ports) in allowed_flows.items():
         # if the flow allows all ports or have no corresponding policy, then allow all ports
@@ -286,9 +281,11 @@ def get_allowed_flows(policy_dicts, pod_id_to_info):
         src_pod_info = pod_id_to_info[src_pod_id]
         dst_pod_info = pod_id_to_info[dst_pod_id]
         key = (src_pod_info.namespace, src_pod_info.name, dst_pod_info.ip_address)
-        all_allowed_flows[key] = ingress_ports & egress_ports
+        allowed_ports = ingress_ports & egress_ports
+        forbidden_ports = all_ports - allowed_ports
+        policy_flows[key] = (allowed_ports, forbidden_ports)
 
-    return all_allowed_flows, all_ports
+    return policy_flows, all_ports
 
 
 def evaluate_one_pod_ip(namespace, name, ips, is_exp, finished_num, lock):
@@ -310,6 +307,8 @@ def evaluate_all_pods_multiprocess(pod_infos, is_exp):
         ip_pool_size = 1
     elif pn == -1:
         ip_pool_size = len(all_ips)
+    elif pn == -2:
+        ip_pool_size = len(all_ips) // 3
     else:
         ip_pool_size = len(all_ips) // (pn // len(pod_infos))
 
@@ -363,34 +362,36 @@ def parse_output_files(output_dir):
     return flows
 
 
-def calculate_statistics(allowed_flows, control_flows, exp_flows):
-    positive_count = 0
+def calculate_statistics(policy_flows, control_flows, exp_flows):
     true_positive_count = 0
+    false_negative_count = 0
+    positive_count = 0
     negative_count = 0
-    true_negative_count = 0
-    redundant_count = 0
-    allowed_count = 0
     rejected_count = 0
     open_count = 0
 
-    for key, allowed_ports in allowed_flows.items():
+    for key, (policy_allowed_ports, policy_forbidden_ports) in policy_flows.items():
         (control_open_ports, control_closed_ports, _) = control_flows[key]
-        (open_ports, closed_ports, forbidden_ports) = exp_flows[key]
-        rejected_count += len(control_open_ports - open_ports)
+        (exp_open_ports, exp_closed_ports, exp_forbidden_ports) = exp_flows[key]
+
+        # calculate anticipatory statistics
+        positive_count += len(policy_allowed_ports)
+        negative_count += len(policy_forbidden_ports)
+
+        # calculate tp & fn statistics
+        exp_allowed_ports = exp_open_ports | exp_closed_ports
+        true_positive_count += len(exp_allowed_ports & policy_allowed_ports)
+        false_negative_count += len(exp_allowed_ports & policy_forbidden_ports)
+
+        # calculate rejection statistics
         open_count += len(control_open_ports)
-        positive_set = open_ports | closed_ports
-        allowed_count += len(allowed_ports)
-        redundant_count += len(closed_ports)
-        negative_count += len(forbidden_ports)
-        true_negative_count += len(forbidden_ports - allowed_ports)
-        positive_count += len(positive_set)
-        true_positive_count += len(positive_set & allowed_ports)
+        rejected_count += len(control_open_ports - exp_open_ports)
+
     true_positive_rate = true_positive_count / positive_count if positive_count > 0 else 1.0
-    true_negative_rate = true_negative_count / negative_count if negative_count > 0 else 1.0
-    redundancy_rate = redundant_count / allowed_count if allowed_count > 0 else 0.0
+    false_negative_rate = false_negative_count / negative_count if negative_count > 0 else 0.0
     rejection_rate = rejected_count / open_count if open_count > 0 else 0.0
 
-    return EvaluationReport(true_positive_rate, true_negative_rate, redundancy_rate, rejection_rate)
+    return EvaluationReport(true_positive_rate, false_negative_rate, rejection_rate)
 
 
 def collect_evaluation_results(pod_id_to_info, outs_dir):
@@ -456,7 +457,10 @@ def evaluate():
         policies.append(yaml.safe_load(open(os.path.join(policies_dir, policy_file))))
 
     pod_id_to_info = get_pod_infos(report, namespace=namespace)
-    allowed_flows, all_ports = get_allowed_flows(policies, pod_id_to_info)
+    if len(pod_id_to_info) == 0:
+        print(f"\033[31mNumber of valid pods ({len(pod_id_to_info)}) < 2, aborting...\033[0m")
+        return
+    policy_flows, all_ports = get_policy_flows(policies, pod_id_to_info)
 
     # prepare data for evaluation shell scripts
     with open(f"{root_dir}/all_ports", "w") as f:
@@ -512,7 +516,7 @@ def evaluate():
     print("\033[33mGenerating evaluation report...\033[0m")
     control_flows = parse_output_files(outs_control_dir)
     exp_flows = parse_output_files(outs_exp_dir)
-    evaluation_report = calculate_statistics(allowed_flows, control_flows, exp_flows)
+    evaluation_report = calculate_statistics(policy_flows, control_flows, exp_flows)
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     print(f"\nGenerated at {timestamp}:")
     print(f"\033[36m{evaluation_report}\033[0m")
@@ -533,10 +537,10 @@ if __name__ == "__main__":
                            help="Skip the injection of debug containers. This should not used for the first time.",
                            action="store_true", default=False)
     arguments.add_argument("-p", "--process-number",
-                           help="Number of processes. Max (Default) is [pod_num * (pod_num - 1)]. "
+                           help="Number of processes. Max is [pod_num * ip_num]. "
                                 "Min is [pod_num]. You can specify a number between them or input max/min. "
                                 "Note that the actual process number may be slightly different.",
-                           default="max")
+                           default="-2")
     args = arguments.parse_args()
     if args.process_number == "max":
         pn = 0
