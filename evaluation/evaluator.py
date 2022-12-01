@@ -47,20 +47,21 @@ class Flow:
 
 
 class Selector:
-    def __init__(self, labels, namespace):
-        self.labels = labels
-        self.namespace = namespace
+    def __init__(self, ns_labels, pod_labels):
+        self.ns_labels = ns_labels
+        self.pod_labels = pod_labels
 
     def match(self, pod_info):
-        return label_matched(self.labels, pod_info.labels) and self.namespace == pod_info.namespace
+        return label_matched(self.ns_labels, pod_info.ns_labels) and label_matched(self.pod_labels, pod_info.labels)
 
 
 class PodInfo:
 
-    def __init__(self, name, labels, namespace, ip_address):
+    def __init__(self, ns_name, ns_labels, name, labels, ip_address):
+        self.ns_name = ns_name
+        self.ns_labels = ns_labels
         self.name = name
         self.labels = labels
-        self.namespace = namespace
         self.ip_address = ip_address
 
 
@@ -69,9 +70,9 @@ class Policy:
     Represents a policy. Each policy object can generate a policy YAML file.
     """
 
-    def __init__(self, name, inside_labels, namespace, policy_types):
+    def __init__(self, name, ns_labels, inside_labels, policy_types):
         self.name = name
-        self.inside_selector = Selector(inside_labels, namespace)
+        self.inside_selector = Selector(ns_labels, inside_labels)
         self.ingress_rules = []
         self.egress_rules = []
         self.policy_types = policy_types
@@ -103,18 +104,17 @@ class Policy:
         metadata = policy_dict["metadata"]
         spec = policy_dict["spec"]
         policy_name = metadata["name"]
-        policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]]
+        policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]] if "policyTypes" in spec else []
         policy_selector = spec["podSelector"]["matchLabels"] if "podSelector" in spec else {}
-        policy = Policy(policy_name, policy_selector, metadata["namespace"], policy_types)
+        policy = Policy(policy_name, {K8S_NS_LABEL: metadata["namespace"]}, policy_selector, policy_types)
         if "ingress" in spec:
             for rule in spec["ingress"]:
                 selectors = []
                 if "from" in rule:
                     for pod in rule["from"]:
+                        ns_labels = pod["namespaceSelector"]["matchLabels"] if "namespaceSelector" in pod else {}
                         pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
-                        pod_ns = pod["namespaceSelector"]["matchLabels"][
-                            K8S_NS_LABEL] if "namespaceSelector" in pod else ""
-                        selectors.append(Selector(pod_labels, pod_ns))
+                        selectors.append(Selector(ns_labels, pod_labels))
                 ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.INGRESS, Rule(selectors, ports))
         if "egress" in spec:
@@ -122,10 +122,9 @@ class Policy:
                 selectors = []
                 if "to" in rule:
                     for pod in rule["to"]:
+                        ns_labels = pod["namespaceSelector"]["matchLabels"] if "namespaceSelector" in pod else {}
                         pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
-                        pod_ns = pod["namespaceSelector"]["matchLabels"][
-                            K8S_NS_LABEL] if "namespaceSelector" in pod else ""
-                        selectors.append(Selector(pod_labels, pod_ns))
+                        selectors.append(Selector(ns_labels, pod_labels))
                 ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.EGRESS, Rule(selectors, ports))
         return policy
@@ -184,6 +183,15 @@ def assemble_proc_id(host_node_id, pid):
 
 def get_pod_infos(report, uuid=None, ignored_namespaces=None, namespace=None):
     pods = report["Pod"]["nodes"]
+    namespaces = report["Namespace"]["nodes"]
+
+    ns_name_to_labels = {}
+    for ns_id, ns_info in namespaces.items():
+        latest_info = ns_info["latest"]
+        ns_name = latest_info[NAME_KEY]["value"]
+        ns_labels = parse_labels(latest_info)
+        ns_name_to_labels[ns_name] = ns_labels
+
     # Extract all pods into a dictionary {pod_id: pod_info}
     pod_id_to_info = {}
     for pod_id, pod_info in pods.items():
@@ -201,10 +209,12 @@ def get_pod_infos(report, uuid=None, ignored_namespaces=None, namespace=None):
             continue
 
         pod_name = latest_info[NAME_KEY]["value"]
-        pod_ns = latest_info[NAMESPACE_KEY]["value"]
         pod_ip = latest_info[IP_ADDRESS_KEY]["value"]
         pod_labels = parse_labels(latest_info)
-        pod_id_to_info[pod_id] = PodInfo(pod_name, pod_labels, pod_ns, pod_ip)
+        ns_name = latest_info[NAMESPACE_KEY]["value"]
+        ns_labels = ns_name_to_labels[ns_name]
+
+        pod_id_to_info[pod_id] = PodInfo(ns_name, ns_labels, pod_name, pod_labels, pod_ip)
 
     return pod_id_to_info
 
@@ -280,7 +290,7 @@ def get_policy_flows(policy_dicts, pod_id_to_info):
             egress_ports = all_ports
         src_pod_info = pod_id_to_info[src_pod_id]
         dst_pod_info = pod_id_to_info[dst_pod_id]
-        key = (src_pod_info.namespace, src_pod_info.name, dst_pod_info.ip_address)
+        key = (src_pod_info.ns_name, src_pod_info.name, dst_pod_info.ip_address)
         allowed_ports = ingress_ports & egress_ports
         forbidden_ports = all_ports - allowed_ports
         policy_flows[key] = (allowed_ports, forbidden_ports)
@@ -301,16 +311,22 @@ def evaluate_one_pod_ip(namespace, name, ips, is_exp, finished_num, lock):
 
 def evaluate_all_pods_multiprocess(pod_infos, is_exp):
     all_ips = [pod_info.ip_address for pod_info in pod_infos]
+    ip_num = len(all_ips)
+    pod_num = len(pod_infos)
 
     # set ip pool size
     if pn == 0:
         ip_pool_size = 1
     elif pn == -1:
-        ip_pool_size = len(all_ips)
+        ip_pool_size = ip_num
     elif pn == -2:
-        ip_pool_size = len(all_ips) // 3
+        ip_pool_size = ip_num // 3
+    elif pn < pod_num:
+        ip_pool_size = ip_num
+    elif pn > pod_num * ip_num:
+        ip_pool_size = 1
     else:
-        ip_pool_size = len(all_ips) // (pn // len(pod_infos))
+        ip_pool_size = ip_num // (pn // pod_num)
 
     finished_num = multiprocessing.Value(ctypes.c_int, 0)
     processes = []
@@ -319,7 +335,7 @@ def evaluate_all_pods_multiprocess(pod_infos, is_exp):
         for index in range(0, len(all_ips), ip_pool_size):
             ips = all_ips[index:index + ip_pool_size]
             p = multiprocessing.Process(target=evaluate_one_pod_ip,
-                                        args=(pod_info.namespace, pod_info.name, ips, is_exp, finished_num, lock))
+                                        args=(pod_info.ns_name, pod_info.name, ips, is_exp, finished_num, lock))
             processes.append(p)
     i = 0
     total = len(processes)
@@ -400,7 +416,7 @@ def collect_evaluation_results(pod_id_to_info, outs_dir):
     for info in pod_id_to_info.values():
         loading = ["|", "/", "-", "\\"][finished % 4]
         print(f"\r{loading} Finished: \033[1m{finished}/{total}\033[0m", end="")
-        os.system(f"kubectl cp {info.namespace}/{info.name}:outs {outs_dir} -c debugger")
+        os.system(f"kubectl cp {info.ns_name}/{info.name}:outs {outs_dir} -c debugger")
         finished += 1
     finish_icon = "✓"
     print(f"\r{finish_icon} Finished: \033[1m{finished}/{total}\033[0m")
@@ -412,9 +428,9 @@ def data_preparation(pod_id_to_info, root_dir):
     for info in pod_id_to_info.values():
         loading = ["|", "/", "-", "\\"][finished % 4]
         print(f"\r{loading} Finished: \033[1m{finished}/{total}\033[0m", end="")
-        os.system(f"kubectl cp {root_dir}/all_ports {info.namespace}/{info.name}:/ -c debugger")
-        os.system(f"kubectl cp {root_dir}/evaluation_script.sh {info.namespace}/{info.name}:/ -c debugger")
-        os.system(f"kubectl exec -n {info.namespace} {info.name} -c debugger -- rm -rf /outs")
+        os.system(f"kubectl cp {root_dir}/all_ports {info.ns_name}/{info.name}:/ -c debugger")
+        os.system(f"kubectl cp {root_dir}/evaluation_script.sh {info.ns_name}/{info.name}:/ -c debugger")
+        os.system(f"kubectl exec -n {info.ns_name} {info.name} -c debugger -- rm -rf /outs")
         finished += 1
     finish_icon = "✓"
     print(f"\r{finish_icon} Finished: \033[1m{finished}/{total}\033[0m")
@@ -452,15 +468,15 @@ def evaluate():
     scope_url = "http://192.168.218.133:4040"
     report_raw_json = requests.get(f"{scope_url}/api/report")
     report = json.loads(report_raw_json.content.decode())
-    policies = []
+    policy_dicts = []
     for policy_file in os.listdir(policies_dir):
-        policies.append(yaml.safe_load(open(os.path.join(policies_dir, policy_file))))
+        policy_dicts.append(yaml.safe_load(open(os.path.join(policies_dir, policy_file))))
 
     pod_id_to_info = get_pod_infos(report, namespace=namespace)
     if len(pod_id_to_info) == 0:
         print(f"\033[31mNumber of valid pods ({len(pod_id_to_info)}) < 2, aborting...\033[0m")
         return
-    policy_flows, all_ports = get_policy_flows(policies, pod_id_to_info)
+    policy_flows, all_ports = get_policy_flows(policy_dicts, pod_id_to_info)
 
     # prepare data for evaluation shell scripts
     with open(f"{root_dir}/all_ports", "w") as f:
@@ -472,7 +488,7 @@ def evaluate():
         # inject debugger containers to pods
         print("\033[33mDeploying debug containers...\033[0m")
         for info in pod_id_to_info.values():
-            os.system(f"kubectl debug {info.name} -n {info.namespace} --image=busybox -c debugger -- sleep 10000000000")
+            os.system(f"kubectl debug {info.name} -n {info.ns_name} --image=busybox -c debugger -- sleep 10000000000")
         print("\033[32mAll debug containers are deployed, but it may take some time to set up.\033[0m")
         input("\033[1mPress Enter When All Debuggers Are in RUNNING state.\033[0m")
 

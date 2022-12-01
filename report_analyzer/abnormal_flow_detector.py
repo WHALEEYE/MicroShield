@@ -5,7 +5,7 @@ from enum import Enum
 
 import yaml
 
-from .logger import Logger, Mode
+from logger import Logger, Mode
 
 LABEL_PREFIX = "kubernetes_labels_"
 NAME_KEY = "kubernetes_name"
@@ -40,24 +40,26 @@ class Flow:
 
 
 class Selector:
-    def __init__(self, labels, namespace):
+    def __init__(self, ns_labels, labels):
+        self.ns_labels = ns_labels
         self.labels = labels
-        self.namespace = namespace
 
     def match(self, resource_info):
-        return label_matched(self.labels, resource_info.labels) and self.namespace == resource_info.namespace
+        return label_matched(self.ns_labels, resource_info.ns_labels) and label_matched(self.labels,
+                                                                                        resource_info.labels)
 
 
 class ResourceInfo:
 
-    def __init__(self, resource_name, labels, namespace, resource_type):
+    def __init__(self, ns_name, ns_labels, resource_name, labels, resource_type):
+        self.ns_name = ns_name
+        self.ns_labels = ns_labels
         self.resource_name = resource_name
         self.labels = labels
-        self.namespace = namespace
         self.resource_type = resource_type
 
     def get_canonical_name(self):
-        return f"{self.resource_type.name.lower()}-{self.resource_name}-{self.namespace}"
+        return f"{self.resource_type.name.lower()}-{self.resource_name}-{self.ns_name}"
 
 
 class Policy:
@@ -65,9 +67,9 @@ class Policy:
     Represents a policy. Each policy object can generate a policy YAML file.
     """
 
-    def __init__(self, name, inside_labels, namespace, policy_types):
+    def __init__(self, name, ns_labels, inside_labels, policy_types):
         self.name = name
-        self.inside_selector = Selector(inside_labels, namespace)
+        self.inside_selector = Selector(ns_labels, inside_labels)
         self.ingress_rules = []
         self.egress_rules = []
         self.policy_types = policy_types
@@ -99,18 +101,17 @@ class Policy:
         metadata = policy_dict["metadata"]
         spec = policy_dict["spec"]
         policy_name = metadata["name"]
-        policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]]
+        policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]] if "policyTypes" in spec else []
         policy_selector = spec["podSelector"]["matchLabels"] if "podSelector" in spec else {}
-        policy = Policy(policy_name, policy_selector, metadata["namespace"], policy_types)
+        policy = Policy(policy_name, {K8S_NS_LABEL: metadata["namespace"]}, policy_selector, policy_types)
         if "ingress" in spec:
             for rule in spec["ingress"]:
                 selectors = []
                 if "from" in rule:
                     for pod in rule["from"]:
+                        ns_labels = pod["namespaceSelector"]["matchLabels"] if "namespaceSelector" in pod else {}
                         pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
-                        pod_ns = pod["namespaceSelector"]["matchLabels"][
-                            K8S_NS_LABEL] if "namespaceSelector" in pod else ""
-                        selectors.append(Selector(pod_labels, pod_ns))
+                        selectors.append(Selector(ns_labels, pod_labels))
                 ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.INGRESS, Rule(selectors, ports))
         if "egress" in spec:
@@ -118,10 +119,9 @@ class Policy:
                 selectors = []
                 if "to" in rule:
                     for pod in rule["to"]:
+                        ns_labels = pod["namespaceSelector"]["matchLabels"] if "namespaceSelector" in pod else {}
                         pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
-                        pod_ns = pod["namespaceSelector"]["matchLabels"][
-                            K8S_NS_LABEL] if "namespaceSelector" in pod else ""
-                        selectors.append(Selector(pod_labels, pod_ns))
+                        selectors.append(Selector(ns_labels, pod_labels))
                 ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.EGRESS, Rule(selectors, ports))
         return policy
@@ -170,7 +170,7 @@ def get_parent_id(info, parent_type):
     return None
 
 
-def parse_label(latest_info):
+def parse_labels(latest_info):
     """
     Parse the label string to a dictionary.
     """
@@ -196,6 +196,7 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
     enp_to_info = {}
     pod_id_to_rsc_info = {}
     resource_id_to_info = {}
+    ns_name_to_labels = {}
 
     static_policies = {}
     for policy_dict in static_policy_dicts:
@@ -207,6 +208,13 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
     ctns = report["Container"]["nodes"]
     pods = report["Pod"]["nodes"]
     deps = report["Deployment"]["nodes"]
+    namespaces = report["Namespace"]["nodes"]
+
+    for ns_id, ns_info in namespaces.items():
+        latest_info = ns_info["latest"]
+        ns_name = latest_info[NAME_KEY]["value"]
+        ns_labels = parse_labels(latest_info)
+        ns_name_to_labels[ns_name] = ns_labels
 
     for proc_id, proc_info in procs.items():
         parent_ctn_id = get_parent_id(proc_info, "container")
@@ -215,11 +223,15 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
         prt_pod_id = get_parent_id(ctns[parent_ctn_id], "pod")
         if prt_pod_id not in pods:
             continue
+
+        # filter code
+        # only consider the processes in the pods with specified uuid
         if pods[prt_pod_id]["latest"][UUID_KEY]["value"] != uuid:
             continue
         # ignore the pods with specific namespaces
         if pods[prt_pod_id]["latest"][NAMESPACE_KEY]["value"] in ignored_namespaces:
             continue
+
         proc_to_pod[proc_id] = prt_pod_id
 
     for enp_id, enp_info in enps.items():
@@ -238,8 +250,13 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
 
     for pod_id, pod_info in pods.items():
         pod_latest = pod_info["latest"]
-        labels = parse_label(pod_latest)
-        namespace = pod_latest[NAMESPACE_KEY]["value"]
+
+        # namespace info
+        ns_name = pod_latest[NAMESPACE_KEY]["value"]
+        ns_labels = ns_name_to_labels[ns_name]
+
+        # pod info
+        labels = parse_labels(pod_latest)
         pod_name = pod_latest[NAME_KEY]["value"]
         prt_dep_id = get_parent_id(pods[pod_id], "deployment")
         resource_name = pod_name
@@ -250,7 +267,7 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
             resource_type = ResourceType.DEPLOYMENT
             resource_name = deps[prt_dep_id]["latest"][NAME_KEY]["value"]
         if resource_id not in resource_id_to_info:
-            resource_id_to_info[resource_id] = ResourceInfo(resource_name, labels, namespace, resource_type)
+            resource_id_to_info[resource_id] = ResourceInfo(ns_name, ns_labels, resource_name, labels, resource_type)
         pod_id_to_rsc_info[pod_id] = resource_id_to_info[resource_id]
 
     abnormal_flows = []
