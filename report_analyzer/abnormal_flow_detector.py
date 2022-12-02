@@ -8,11 +8,16 @@ import yaml
 from logger import Logger, Mode
 
 LABEL_PREFIX = "kubernetes_labels_"
-NAME_KEY = "kubernetes_name"
-NAMESPACE_KEY = "kubernetes_namespace"
+PROC_NAME_KEY = "name"
+CTN_NAME_KEY = "docker_label_io.kubernetes.container.name"
+POD_NAME_KEY = "kubernetes_name"
+DEP_NAME_KEY = "kubernetes_name"
+CTN_NAMESPACE_KEY = "docker_label_io.kubernetes.pod.namespace"
+POD_NAMESPACE_KEY = "kubernetes_namespace"
 SERVICE_SELECTOR = "kubernetes_selector"
 K8S_NS_LABEL = "kubernetes.io/metadata.name"
-UUID_KEY = "kubernetes_cluster_uuid"
+POD_UUID_KEY = "kubernetes_cluster_uuid"
+CTN_UUID_KEY = "cluster_uuid"
 IGNORED_LABELS = {"controller-revision-hash", "statefulset.kubernetes.io/pod-name"}
 
 
@@ -46,20 +51,32 @@ class Selector:
 
     def match(self, resource_info):
         return label_matched(self.ns_labels, resource_info.ns_labels) and label_matched(self.labels,
-                                                                                        resource_info.labels)
+                                                                                        resource_info.rsc_labels)
 
 
 class ResourceInfo:
 
-    def __init__(self, ns_name, ns_labels, resource_name, labels, resource_type):
+    def __init__(self, rsc_type, ns_name, ns_labels, rsc_name, rsc_labels):
+        self.rsc_type = rsc_type
         self.ns_name = ns_name
         self.ns_labels = ns_labels
-        self.resource_name = resource_name
-        self.labels = labels
-        self.resource_type = resource_type
+        self.rsc_name = rsc_name
+        self.rsc_labels = rsc_labels
 
     def get_canonical_name(self):
-        return f"{self.resource_type.name.lower()}-{self.resource_name}-{self.ns_name}"
+        return f"{self.rsc_type.name.lower()}-{self.rsc_name}-{self.ns_name}"
+
+
+class JudgeResult(Enum):
+    NOT_MATCHED = 1
+    ALLOW = 2
+    DENY = 3
+
+
+class FlowState(Enum):
+    NO_MATCH = 1
+    ALLOWED = 2
+    DENIED = 3
 
 
 class Policy:
@@ -79,22 +96,22 @@ class Policy:
         rules.append(rule)
 
     def judge_flow(self, fr_rsc_info, to_rsc_info, port, direction):
-        # Judge if the flow is matched by the policy
+        # if the policy don't apply to the pod, return None
         inside_resource_info = to_rsc_info if direction == Direction.INGRESS else fr_rsc_info
         if not self.inside_selector.match(inside_resource_info):
-            return False
+            return JudgeResult.NOT_MATCHED
 
         # If the policy does not have this direction in policyTypes, the flow is allowed
         if direction.name.lower() not in self.policy_types:
-            return True
+            return JudgeResult.ALLOW
 
         # Judge if the flow is allowed by the rules
         rules = self.ingress_rules if direction == Direction.INGRESS else self.egress_rules
         outside_resource_info = fr_rsc_info if direction == Direction.INGRESS else to_rsc_info
         for rule in rules:
             if rule.judge_flow(outside_resource_info, port):
-                return True
-        return False
+                return JudgeResult.ALLOW
+        return JudgeResult.DENY
 
     @staticmethod
     def read_from_dict(policy_dict):
@@ -133,8 +150,10 @@ class Direction(Enum):
 
 
 class ResourceType(Enum):
-    POD = 1
-    DEPLOYMENT = 2
+    PROC = 1
+    CTN = 2
+    POD = 3
+    DEP = 4
 
 
 class Rule:
@@ -190,12 +209,11 @@ def assemble_proc_id(host_node_id, pid):
 
 
 def compare(static_policy_dicts, report, uuid, ignored_namespaces):
-    proc_to_pod = {}
-    enp_to_pod = {}
+    proc_to_rsc = {}
+    enp_to_rsc = {}
     enp_to_adj = {}
     enp_to_info = {}
-    pod_id_to_rsc_info = {}
-    resource_id_to_info = {}
+    rsc_to_info = {}
     ns_name_to_labels = {}
 
     static_policies = {}
@@ -211,28 +229,85 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
     namespaces = report["Namespace"]["nodes"]
 
     for ns_id, ns_info in namespaces.items():
-        latest_info = ns_info["latest"]
-        ns_name = latest_info[NAME_KEY]["value"]
-        ns_labels = parse_labels(latest_info)
+        ns_latest_info = ns_info["latest"]
+        ns_name = ns_latest_info[POD_NAME_KEY]["value"]
+        ns_labels = parse_labels(ns_latest_info)
         ns_name_to_labels[ns_name] = ns_labels
 
     for proc_id, proc_info in procs.items():
-        parent_ctn_id = get_parent_id(proc_info, "container")
-        if parent_ctn_id not in ctns:
+        # check if the process has a container
+        ctn_id = get_parent_id(proc_info, "container")
+        # if the process don't have a container, use process as the resource
+        # process have no pod labels and namespace labels
+        if ctn_id not in ctns:
+            proc_latest_info = proc_info["latest"]
+            if proc_id not in rsc_to_info:
+                rsc_name = proc_latest_info[PROC_NAME_KEY]["value"] if PROC_NAME_KEY in proc_latest_info else ""
+                rsc_info = ResourceInfo(ResourceType.PROC, "", {}, rsc_name, {})
+                rsc_to_info[proc_id] = rsc_info
+            proc_to_rsc[proc_id] = proc_id
             continue
-        prt_pod_id = get_parent_id(ctns[parent_ctn_id], "pod")
-        if prt_pod_id not in pods:
-            continue
+
+        ctn_latest_info = ctns[ctn_id]["latest"]
 
         # filter code
-        # only consider the processes in the pods with specified uuid
-        if pods[prt_pod_id]["latest"][UUID_KEY]["value"] != uuid:
-            continue
-        # ignore the pods with specific namespaces
-        if pods[prt_pod_id]["latest"][NAMESPACE_KEY]["value"] in ignored_namespaces:
+        # only consider the processes in the containers with specified uuid
+        if ctn_latest_info[CTN_UUID_KEY]["value"] != uuid:
             continue
 
-        proc_to_pod[proc_id] = prt_pod_id
+        # TODO: Check the implementation of ignored_namespaces
+        # # ignore the containers with specific namespaces
+        # if CTN_NAMESPACE_KEY in ctn_latest_info and ctn_latest_info[CTN_NAMESPACE_KEY]["value"] in ignored_namespaces:
+        #     continue
+
+        # check if the container has a pod
+        pod_id = get_parent_id(ctns[ctn_id], "pod")
+        # if the container don't have a pod, use container as the resource
+        # container have no pod labels but may have namespace labels
+        if pod_id not in pods:
+            if ctn_id not in rsc_to_info:
+                ns_name = ctn_latest_info[CTN_NAMESPACE_KEY]["value"] if CTN_NAMESPACE_KEY in ctn_latest_info else ""
+                ns_labels = ns_name_to_labels[ns_name] if ns_name in ns_name_to_labels else {}
+                rsc_name = ctn_latest_info[CTN_NAME_KEY]["value"] if CTN_NAME_KEY in ctn_latest_info else ""
+                rsc_info = ResourceInfo(ResourceType.CTN, ns_name, ns_labels, rsc_name, {})
+                rsc_to_info[ctn_id] = rsc_info
+            proc_to_rsc[proc_id] = ctn_id
+            continue
+
+        pod_latest_info = pods[pod_id]["latest"]
+
+        # TODO: Check the implementation of ignored_namespaces
+        # if there is a pod, filter again to ignore the pods with specific namespaces
+        # # ignore the pods with specific namespaces
+        # if POD_NAMESPACE_KEY in pod_latest_info and pod_latest_info[POD_NAMESPACE_KEY]["value"] in ignored_namespaces:
+        #     continue
+
+        # if there is a pod, store the pod_labels, ns_name and ns_labels
+        # these will be the same as its deployment
+        # the only difference is the rsc_name
+        ns_name = pod_latest_info[POD_NAMESPACE_KEY]["value"] if POD_NAMESPACE_KEY in pod_latest_info else ""
+        ns_labels = ns_name_to_labels[ns_name] if ns_name in ns_name_to_labels else {}
+        pod_labels = parse_labels(pod_latest_info)
+
+        # check if the pod has a deployment
+        dep_id = get_parent_id(pods[pod_id], "deployment")
+        # if the pod don't have a deployment, use pod as the resource
+        # pod have pod labels and namespace labels
+        if dep_id not in deps:
+            if pod_id not in rsc_to_info:
+                rsc_name = pod_latest_info[POD_NAME_KEY]["value"] if POD_NAME_KEY in pod_latest_info else ""
+                rsc_info = ResourceInfo(ResourceType.POD, ns_name, ns_labels, rsc_name, pod_labels)
+                rsc_to_info[pod_id] = rsc_info
+            proc_to_rsc[proc_id] = pod_id
+            continue
+
+        # if the pod have a deployment, use deployment as the resource
+        # deployment have pod labels and namespace labels
+        dep_latest_info = deps[dep_id]["latest"]
+        if dep_id not in rsc_to_info:
+            rsc_name = dep_latest_info[DEP_NAME_KEY]["value"] if DEP_NAME_KEY in dep_latest_info else ""
+            rsc_to_info[dep_id] = ResourceInfo(ResourceType.DEP, ns_name, ns_labels, rsc_name, pod_labels)
+        proc_to_rsc[proc_id] = dep_id
 
     for enp_id, enp_info in enps.items():
         enp_to_adj[enp_id] = enp_info["adjacency"] if "adjacency" in enp_info else []
@@ -244,74 +319,74 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
         host_node_id = enp_latest["host_node_id"]["value"]
         proc_id = assemble_proc_id(host_node_id, enp_latest["pid"]["value"])
         enp_to_info[enp_id] = Endpoint(enp_id.split(";")[-2], enp_id.split(";")[-1], host_node_id.split(";")[0])
-        if proc_id not in proc_to_pod:
+        if proc_id not in proc_to_rsc:
             continue
-        enp_to_pod[enp_id] = proc_to_pod[proc_id]
-
-    for pod_id, pod_info in pods.items():
-        pod_latest = pod_info["latest"]
-
-        # namespace info
-        ns_name = pod_latest[NAMESPACE_KEY]["value"]
-        ns_labels = ns_name_to_labels[ns_name]
-
-        # pod info
-        labels = parse_labels(pod_latest)
-        pod_name = pod_latest[NAME_KEY]["value"]
-        prt_dep_id = get_parent_id(pods[pod_id], "deployment")
-        resource_name = pod_name
-        resource_id = pod_id
-        resource_type = ResourceType.POD
-        if prt_dep_id in deps and "latest" in deps[prt_dep_id]:
-            resource_id = prt_dep_id
-            resource_type = ResourceType.DEPLOYMENT
-            resource_name = deps[prt_dep_id]["latest"][NAME_KEY]["value"]
-        if resource_id not in resource_id_to_info:
-            resource_id_to_info[resource_id] = ResourceInfo(ns_name, ns_labels, resource_name, labels, resource_type)
-        pod_id_to_rsc_info[pod_id] = resource_id_to_info[resource_id]
+        enp_to_rsc[enp_id] = proc_to_rsc[proc_id]
 
     abnormal_flows = []
 
     # Go through all the flows to find the abnormal flows
-    for fr_enp_id, fr_pod_id in enp_to_pod.items():
+    for fr_enp_id, fr_rsc_id in enp_to_rsc.items():
         to_enps = enp_to_adj[fr_enp_id]
         for to_enp_id in to_enps:
-            if to_enp_id not in enp_to_pod:
+            if to_enp_id not in enp_to_rsc:
                 continue
-            to_pod_id = enp_to_pod[to_enp_id]
-            if to_pod_id == fr_pod_id:
+            to_rsc_id = enp_to_rsc[to_enp_id]
+            if to_rsc_id == fr_rsc_id:
                 continue
-            to_rsc_info = pod_id_to_rsc_info[to_pod_id]
-            fr_rsc_info = pod_id_to_rsc_info[fr_pod_id]
+            to_rsc_info = rsc_to_info[to_rsc_id]
+            fr_rsc_info = rsc_to_info[fr_rsc_id]
+
+            # TODO: Check the implementation of ignored_namespaces
+            # ignore the flows between ignored namespaces
+            if to_rsc_info.ns_name in ignored_namespaces and fr_rsc_info.ns_name in ignored_namespaces:
+                continue
+
             port = int(to_enp_id.split(";")[-1])
 
-            ingress_allow = False
-            egress_allow = False
-            allowed = False
+            ingress_state = FlowState.NO_MATCH
+            egress_state = FlowState.NO_MATCH
 
             # the policies with the same canonical name will have higher priority
+            # ingress test
             if to_rsc_info.get_canonical_name() in static_policies:
                 policy = static_policies[to_rsc_info.get_canonical_name()]
-                if policy.judge_flow(fr_rsc_info, to_rsc_info, port, Direction.INGRESS):
-                    ingress_allow = True
+                ingress_result = policy.judge_flow(fr_rsc_info, to_rsc_info, port, Direction.INGRESS)
+                if ingress_result == JudgeResult.ALLOW:
+                    ingress_state = FlowState.ALLOWED
+                elif ingress_result == JudgeResult.DENY:
+                    ingress_state = FlowState.DENIED
+            # egress test
             if fr_rsc_info.get_canonical_name() in static_policies:
                 policy = static_policies[fr_rsc_info.get_canonical_name()]
-                if policy.judge_flow(fr_rsc_info, to_rsc_info, port, Direction.EGRESS):
-                    egress_allow = True
-            if ingress_allow and egress_allow:
+                egress_result = policy.judge_flow(fr_rsc_info, to_rsc_info, port, Direction.EGRESS)
+                if egress_result == JudgeResult.ALLOW:
+                    egress_state = FlowState.ALLOWED
+                elif egress_result == JudgeResult.DENY:
+                    egress_state = FlowState.DENIED
+            if ingress_state == FlowState.ALLOWED and egress_state == FlowState.ALLOWED:
                 continue
 
             # Fallback: go through all the policies
             for policy in static_policies.values():
-                if policy.judge_flow(fr_rsc_info, to_rsc_info, port, Direction.INGRESS):
-                    ingress_allow = True
-                if policy.judge_flow(fr_rsc_info, to_rsc_info, port, Direction.EGRESS):
-                    egress_allow = True
-                if ingress_allow and egress_allow:
-                    allowed = True
+                if ingress_state != FlowState.ALLOWED:
+                    ingress_result = policy.judge_flow(fr_rsc_info, to_rsc_info, port, Direction.INGRESS)
+                    if ingress_result == JudgeResult.ALLOW:
+                        ingress_state = FlowState.ALLOWED
+                    elif ingress_result == JudgeResult.DENY:
+                        ingress_state = FlowState.DENIED
+
+                if egress_state != FlowState.ALLOWED:
+                    egress_result = policy.judge_flow(fr_rsc_info, to_rsc_info, port, Direction.EGRESS)
+                    if egress_result == JudgeResult.ALLOW:
+                        egress_state = FlowState.ALLOWED
+                    elif egress_result == JudgeResult.DENY:
+                        egress_state = FlowState.DENIED
+
+                if ingress_state == FlowState.ALLOWED and egress_state == FlowState.ALLOWED:
                     break
 
-            if not allowed:
+            if ingress_state == FlowState.DENIED or egress_state == FlowState.DENIED:
                 abnormal_flows.append(Flow(enp_to_info[fr_enp_id], enp_to_info[to_enp_id]))
 
     return abnormal_flows
