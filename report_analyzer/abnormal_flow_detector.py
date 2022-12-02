@@ -56,7 +56,8 @@ class Selector:
 
 class ResourceInfo:
 
-    def __init__(self, rsc_type, ns_name, ns_labels, rsc_name, rsc_labels):
+    def __init__(self, uuid, rsc_type, ns_name, ns_labels, rsc_name, rsc_labels):
+        self.uuid = uuid
         self.rsc_type = rsc_type
         self.ns_name = ns_name
         self.ns_labels = ns_labels
@@ -208,7 +209,7 @@ def assemble_proc_id(host_node_id, pid):
     return host_id + ";" + pid
 
 
-def compare(static_policy_dicts, report, uuid, ignored_namespaces):
+def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
     proc_to_rsc = {}
     enp_to_rsc = {}
     enp_to_adj = {}
@@ -243,17 +244,12 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
             proc_latest_info = proc_info["latest"]
             if proc_id not in rsc_to_info:
                 rsc_name = proc_latest_info[PROC_NAME_KEY]["value"] if PROC_NAME_KEY in proc_latest_info else ""
-                rsc_info = ResourceInfo(ResourceType.PROC, "", {}, rsc_name, {})
+                rsc_info = ResourceInfo("", ResourceType.PROC, "", {}, rsc_name, {})
                 rsc_to_info[proc_id] = rsc_info
             proc_to_rsc[proc_id] = proc_id
             continue
 
         ctn_latest_info = ctns[ctn_id]["latest"]
-
-        # filter code
-        # only consider the processes in the containers with specified uuid
-        if ctn_latest_info[CTN_UUID_KEY]["value"] != uuid:
-            continue
 
         # TODO: Check the implementation of ignored_namespaces
         # # ignore the containers with specific namespaces
@@ -266,10 +262,11 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
         # container have no pod labels but may have namespace labels
         if pod_id not in pods:
             if ctn_id not in rsc_to_info:
+                uuid = ctn_latest_info[CTN_UUID_KEY]["value"] if CTN_UUID_KEY in ctn_latest_info else ""
                 ns_name = ctn_latest_info[CTN_NAMESPACE_KEY]["value"] if CTN_NAMESPACE_KEY in ctn_latest_info else ""
                 ns_labels = ns_name_to_labels[ns_name] if ns_name in ns_name_to_labels else {}
                 rsc_name = ctn_latest_info[CTN_NAME_KEY]["value"] if CTN_NAME_KEY in ctn_latest_info else ""
-                rsc_info = ResourceInfo(ResourceType.CTN, ns_name, ns_labels, rsc_name, {})
+                rsc_info = ResourceInfo(uuid, ResourceType.CTN, ns_name, ns_labels, rsc_name, {})
                 rsc_to_info[ctn_id] = rsc_info
             proc_to_rsc[proc_id] = ctn_id
             continue
@@ -285,6 +282,7 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
         # if there is a pod, store the pod_labels, ns_name and ns_labels
         # these will be the same as its deployment
         # the only difference is the rsc_name
+        uuid = pod_latest_info[POD_UUID_KEY]["value"] if POD_UUID_KEY in pod_latest_info else ""
         ns_name = pod_latest_info[POD_NAMESPACE_KEY]["value"] if POD_NAMESPACE_KEY in pod_latest_info else ""
         ns_labels = ns_name_to_labels[ns_name] if ns_name in ns_name_to_labels else {}
         pod_labels = parse_labels(pod_latest_info)
@@ -296,7 +294,7 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
         if dep_id not in deps:
             if pod_id not in rsc_to_info:
                 rsc_name = pod_latest_info[POD_NAME_KEY]["value"] if POD_NAME_KEY in pod_latest_info else ""
-                rsc_info = ResourceInfo(ResourceType.POD, ns_name, ns_labels, rsc_name, pod_labels)
+                rsc_info = ResourceInfo(uuid, ResourceType.POD, ns_name, ns_labels, rsc_name, pod_labels)
                 rsc_to_info[pod_id] = rsc_info
             proc_to_rsc[proc_id] = pod_id
             continue
@@ -306,7 +304,7 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
         dep_latest_info = deps[dep_id]["latest"]
         if dep_id not in rsc_to_info:
             rsc_name = dep_latest_info[DEP_NAME_KEY]["value"] if DEP_NAME_KEY in dep_latest_info else ""
-            rsc_to_info[dep_id] = ResourceInfo(ResourceType.DEP, ns_name, ns_labels, rsc_name, pod_labels)
+            rsc_to_info[dep_id] = ResourceInfo(uuid, ResourceType.DEP, ns_name, ns_labels, rsc_name, pod_labels)
         proc_to_rsc[proc_id] = dep_id
 
     for enp_id, enp_info in enps.items():
@@ -336,6 +334,10 @@ def compare(static_policy_dicts, report, uuid, ignored_namespaces):
                 continue
             to_rsc_info = rsc_to_info[to_rsc_id]
             fr_rsc_info = rsc_to_info[fr_rsc_id]
+
+            # ignore the flows between ignored clusters
+            if to_rsc_info.uuid != target_uuid and fr_rsc_info.uuid != target_uuid:
+                continue
 
             # TODO: Check the implementation of ignored_namespaces
             # ignore the flows between ignored namespaces
