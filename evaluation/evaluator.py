@@ -81,24 +81,6 @@ class Policy:
         rules = self.ingress_rules if direction == Direction.INGRESS else self.egress_rules
         rules.append(rule)
 
-    def judge_flow(self, fr_rsc_info, to_rsc_info, port, direction):
-        # Judge if the flow is matched by the policy
-        inside_resource_info = to_rsc_info if direction == Direction.INGRESS else fr_rsc_info
-        if not self.inside_selector.match(inside_resource_info):
-            return False
-
-        # If the policy does not have this direction in policyTypes, the flow is allowed
-        if direction.name.lower() not in self.policy_types:
-            return True
-
-        # Judge if the flow is allowed by the rules
-        rules = self.ingress_rules if direction == Direction.INGRESS else self.egress_rules
-        outside_resource_info = fr_rsc_info if direction == Direction.INGRESS else to_rsc_info
-        for rule in rules:
-            if rule.judge_flow(outside_resource_info, port):
-                return True
-        return False
-
     @staticmethod
     def read_from_dict(policy_dict):
         metadata = policy_dict["metadata"]
@@ -252,11 +234,12 @@ def get_policy_flows(policy_dicts, pod_id_to_info):
             for pod_id in pod_id_to_info.keys():
                 if pod_id == inside_pod_id:
                     continue
-                # if the pod is not selected by the policy, then initialize it
-                if allowed_flows[(pod_id, inside_pod_id)][0] == {-2}:
+                # if the flow is selected by the policy, then initialize it
+                if allowed_flows[(pod_id, inside_pod_id)][0] == {-2} and "ingress" in policy.policy_types:
                     allowed_flows[(pod_id, inside_pod_id)][0] = set()
-                if allowed_flows[(inside_pod_id, pod_id)][1] == {-2}:
+                if allowed_flows[(inside_pod_id, pod_id)][1] == {-2} and "egress" in policy.policy_types:
                     allowed_flows[(inside_pod_id, pod_id)][1] = set()
+
         for rule in policy.ingress_rules:
             all_ports |= set(rule.ports)
             for pod_id, pod_info in pod_id_to_info.items():
