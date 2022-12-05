@@ -4,6 +4,7 @@ processing-codes/policy-generator/policies/
 processing-codes/data/
 **/__pycache__/
 report_analyzer/test_flow.txt
+report_analyzer/test_data
 
 evaluation/outs
 evaluation/all_ports

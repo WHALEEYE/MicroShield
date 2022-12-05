@@ -85,9 +85,10 @@ class Policy:
     Represents a policy. Each policy object can generate a policy YAML file.
     """
 
-    def __init__(self, name, ns_labels, inside_labels, policy_types):
+    def __init__(self, name, ns_name, inside_labels, policy_types):
         self.name = name
-        self.inside_selector = Selector(ns_labels, inside_labels)
+        self.ns_name = ns_name
+        self.inside_labels = inside_labels
         self.ingress_rules = []
         self.egress_rules = []
         self.policy_types = policy_types
@@ -99,7 +100,8 @@ class Policy:
     def judge_flow(self, fr_rsc_info, to_rsc_info, port, direction):
         # if the policy don't apply to the pod, return None
         inside_resource_info = to_rsc_info if direction == Direction.INGRESS else fr_rsc_info
-        if not self.inside_selector.match(inside_resource_info):
+        if not (label_matched(self.inside_labels,
+                              inside_resource_info.rsc_labels) and self.ns_name == inside_resource_info.ns_name):
             return JudgeResult.NOT_MATCHED
 
         # If the policy does not have this direction in policyTypes, the flow is allowed
@@ -121,7 +123,7 @@ class Policy:
         policy_name = metadata["name"]
         policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]] if "policyTypes" in spec else []
         policy_selector = spec["podSelector"]["matchLabels"] if "podSelector" in spec else {}
-        policy = Policy(policy_name, {K8S_NS_LABEL: metadata["namespace"]}, policy_selector, policy_types)
+        policy = Policy(policy_name, metadata["namespace"], policy_selector, policy_types)
         if "ingress" in spec:
             for rule in spec["ingress"]:
                 selectors = []
@@ -241,7 +243,7 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
         # if the process don't have a container, use process as the resource
         # process have no pod labels and namespace labels
         if ctn_id not in ctns:
-            proc_latest_info = proc_info["latest"]
+            proc_latest_info = proc_info["latest"] if "latest" in proc_info else {}
             if proc_id not in rsc_to_info:
                 rsc_name = proc_latest_info[PROC_NAME_KEY]["value"] if PROC_NAME_KEY in proc_latest_info else ""
                 rsc_info = ResourceInfo("", ResourceType.PROC, "", {}, rsc_name, {})
@@ -250,11 +252,6 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
             continue
 
         ctn_latest_info = ctns[ctn_id]["latest"]
-
-        # TODO: Check the implementation of ignored_namespaces
-        # # ignore the containers with specific namespaces
-        # if CTN_NAMESPACE_KEY in ctn_latest_info and ctn_latest_info[CTN_NAMESPACE_KEY]["value"] in ignored_namespaces:
-        #     continue
 
         # check if the container has a pod
         pod_id = get_parent_id(ctns[ctn_id], "pod")
@@ -272,12 +269,6 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
             continue
 
         pod_latest_info = pods[pod_id]["latest"]
-
-        # TODO: Check the implementation of ignored_namespaces
-        # if there is a pod, filter again to ignore the pods with specific namespaces
-        # # ignore the pods with specific namespaces
-        # if POD_NAMESPACE_KEY in pod_latest_info and pod_latest_info[POD_NAMESPACE_KEY]["value"] in ignored_namespaces:
-        #     continue
 
         # if there is a pod, store the pod_labels, ns_name and ns_labels
         # these will be the same as its deployment
@@ -339,7 +330,6 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
             if to_rsc_info.uuid != target_uuid and fr_rsc_info.uuid != target_uuid:
                 continue
 
-            # TODO: Check the implementation of ignored_namespaces
             # ignore the flows between ignored namespaces
             if to_rsc_info.ns_name in ignored_namespaces and fr_rsc_info.ns_name in ignored_namespaces:
                 continue
