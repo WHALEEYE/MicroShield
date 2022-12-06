@@ -70,9 +70,10 @@ class Policy:
     Represents a policy. Each policy object can generate a policy YAML file.
     """
 
-    def __init__(self, name, ns_labels, inside_labels, policy_types):
+    def __init__(self, name, ns_name, inside_labels, policy_types):
         self.name = name
-        self.inside_selector = Selector(ns_labels, inside_labels)
+        self.ns_name = ns_name
+        self.inside_labels = inside_labels
         self.ingress_rules = []
         self.egress_rules = []
         self.policy_types = policy_types
@@ -81,6 +82,9 @@ class Policy:
         rules = self.ingress_rules if direction == Direction.INGRESS else self.egress_rules
         rules.append(rule)
 
+    def inside_matched(self, pod_info):
+        return label_matched(self.inside_labels, pod_info.labels) and self.ns_name == pod_info.ns_name
+
     @staticmethod
     def read_from_dict(policy_dict):
         metadata = policy_dict["metadata"]
@@ -88,7 +92,7 @@ class Policy:
         policy_name = metadata["name"]
         policy_types = [policy_type.lower() for policy_type in spec["policyTypes"]] if "policyTypes" in spec else []
         policy_selector = spec["podSelector"]["matchLabels"] if "podSelector" in spec else {}
-        policy = Policy(policy_name, {K8S_NS_LABEL: metadata["namespace"]}, policy_selector, policy_types)
+        policy = Policy(policy_name, metadata["namespace"], policy_selector, policy_types)
         if "ingress" in spec:
             for rule in spec["ingress"]:
                 selectors = []
@@ -223,7 +227,7 @@ def get_policy_flows(policy_dicts, pod_id_to_info):
         # get the ID of all pods that are selected by the policy
         inside_pod_ids = []
         for pod_id, pod_info in pod_id_to_info.items():
-            if policy.inside_selector.match(pod_info):
+            if policy.inside_matched(pod_info):
                 inside_pod_ids.append(pod_id)
 
         if not inside_pod_ids:
