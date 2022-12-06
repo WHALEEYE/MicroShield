@@ -137,15 +137,26 @@ class Rule:
 
 
 class EvaluationReport:
-    def __init__(self, true_positive_rate, true_negative_rate, rejection_rate):
+    def __init__(self, true_positive_rate, true_negative_rate, rejection_rate, false_positive_flows,
+                 false_negative_flows):
         self.true_positive_rate = true_positive_rate
         self.true_negative_rate = true_negative_rate
         self.rejection_rate = rejection_rate
+        self.false_positive_flows = false_positive_flows
+        self.false_negative_flows = false_negative_flows
+
+    def get_flows_str(self):
+        fp_str = "\n".join([f"\t{ns}:{name} -> {ip}:{ports}" for (ns, name, ip), ports in self.false_positive_flows])
+        fn_str = "\n".join([f"\t{ns}:{name} -> {ip}:{ports}" for (ns, name, ip), ports in self.false_negative_flows])
+        full_fp_str = f"False positive flows:\n{fp_str}\n" if fp_str else ""
+        full_fn_str = f"False negative flows:\n{fn_str}\n" if fn_str else ""
+        return f"{full_fp_str}{full_fn_str}"
 
     def __str__(self):
         return f"True positive rate: {self.true_positive_rate}\n" \
                f"False negative rate: {self.true_negative_rate}\n" \
-               f"Rejection rate: {self.rejection_rate}\n"
+               f"Rejection rate: {self.rejection_rate}\n" \
+               f"{self.get_flows_str()}"
 
 
 def parse_labels(latest_info):
@@ -266,7 +277,7 @@ def get_policy_flows(policy_dicts, pod_id_to_info):
                     allowed_flows[(inside_pod_id, pod_id)][1] |= ports
 
     # use a dictionary to store the flows in policies of each pod
-    # {(src_pod_name, src_pod_ns, dst_pod_ip): (allowed_ports, forbidden_ports)}
+    # {(src_pod_ns, src_pod_name, dst_pod_ip): (allowed_ports, forbidden_ports)}
     policy_flows = {}
 
     for (src_pod_id, dst_pod_id), (ingress_ports, egress_ports) in allowed_flows.items():
@@ -372,6 +383,8 @@ def calculate_statistics(policy_flows, control_flows, exp_flows):
     negative_count = 0
     rejected_count = 0
     open_count = 0
+    false_positive_flows = {}
+    false_negative_flows = {}
 
     for key, (policy_allowed_ports, policy_forbidden_ports) in policy_flows.items():
         (control_open_ports, control_closed_ports, _) = control_flows[key]
@@ -381,10 +394,21 @@ def calculate_statistics(policy_flows, control_flows, exp_flows):
         positive_count += len(policy_allowed_ports)
         negative_count += len(policy_forbidden_ports)
 
-        # calculate tp & fn statistics
+        # get port sets
         exp_allowed_ports = exp_open_ports | exp_closed_ports
-        true_positive_count += len(exp_allowed_ports & policy_allowed_ports)
-        false_negative_count += len(exp_allowed_ports & policy_forbidden_ports)
+        true_positive_ports = exp_allowed_ports & policy_allowed_ports
+        false_positive_ports = exp_allowed_ports - policy_allowed_ports
+        false_negative_ports = exp_allowed_ports & policy_forbidden_ports
+
+        # calculate tp & fn statistics
+        true_positive_count += len(true_positive_ports)
+        false_negative_count += len(false_negative_ports)
+
+        # store fp & fn flows
+        if false_positive_ports:
+            false_positive_flows[key] = false_positive_ports
+        if false_negative_ports:
+            false_negative_flows[key] = false_negative_ports
 
         # calculate rejection statistics
         open_count += len(control_open_ports)
@@ -394,7 +418,8 @@ def calculate_statistics(policy_flows, control_flows, exp_flows):
     false_negative_rate = false_negative_count / negative_count if negative_count > 0 else 0.0
     rejection_rate = rejected_count / open_count if open_count > 0 else 0.0
 
-    return EvaluationReport(true_positive_rate, false_negative_rate, rejection_rate)
+    return EvaluationReport(true_positive_rate, false_negative_rate, rejection_rate, false_positive_flows,
+                            false_negative_flows)
 
 
 def collect_evaluation_results(pod_id_to_info, outs_dir):
