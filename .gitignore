@@ -10,3 +10,5 @@ evaluation/outs
 evaluation/all_ports
 evaluation/dynamic_policy_generator.py
 evaluation/reports
+evaluation/policies/*.yaml
+evaluation/report.json

@@ -270,12 +270,18 @@ def get_policy_flows(policy_dicts, pod_id_to_info):
                 if pod_id == inside_pod_id:
                     continue
                 # if the flow is selected by the policy, then initialize it
-                if allowed_flows[(pod_id, inside_pod_id)][0] == {-2} and "ingress" in policy.policy_types:
+                if "ingress" not in policy.policy_types:
+                    allowed_flows[(pod_id, inside_pod_id)][0] |= {-1}
+                elif allowed_flows[(pod_id, inside_pod_id)][0] == {-2}:
                     allowed_flows[(pod_id, inside_pod_id)][0] = set()
-                if allowed_flows[(inside_pod_id, pod_id)][1] == {-2} and "egress" in policy.policy_types:
+                if "egress" not in policy.policy_types:
+                    allowed_flows[(inside_pod_id, pod_id)][1] |= {-1}
+                elif allowed_flows[(inside_pod_id, pod_id)][1] == {-2}:
                     allowed_flows[(inside_pod_id, pod_id)][1] = set()
 
         for rule in policy.ingress_rules:
+            if "ingress" not in policy.policy_types:
+                break
             all_ports |= set(rule.ports)
             for pod_id, pod_info in pod_id_to_info.items():
                 if pod_id in inside_pod_ids:
@@ -286,6 +292,8 @@ def get_policy_flows(policy_dicts, pod_id_to_info):
                     ports = set(rule.ports) if rule.ports else {-1}
                     allowed_flows[(pod_id, inside_pod_id)][0] |= ports
         for rule in policy.egress_rules:
+            if "egress" not in policy.policy_types:
+                break
             all_ports |= set(rule.ports)
             for pod_id, pod_info in pod_id_to_info.items():
                 if pod_id in inside_pod_ids:
@@ -507,10 +515,11 @@ def evaluate():
     ignored_namespaces = {"kube-system", "kube-public", "kube-node-lease", "cattle-system", "fleet-system",
                           "ingress-nginx", "weave", "calico-system", "calico-apiserver"}
     uuid = "33d1901faed141cf8ccacf5e94961607"
-    namespace = {"sock-shop"}
+    namespace = {"nginx"}
+    # report_raw_json = open(os.path.join(root_dir, "report.json"), "r").read()
     scope_url = "http://192.168.218.133:4040"
-    report_raw_json = requests.get(f"{scope_url}/api/report")
-    report = json.loads(report_raw_json.content.decode())
+    report_raw_json = requests.get(f"{scope_url}/api/report").content.decode()
+    report = json.loads(report_raw_json)
     policy_dicts = []
     for policy_file in os.listdir(policies_dir):
         policy_dicts.append(yaml.safe_load(open(os.path.join(policies_dir, policy_file))))
