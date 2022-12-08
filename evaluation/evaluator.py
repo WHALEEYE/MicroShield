@@ -284,11 +284,11 @@ def get_policy_flows(policy_dicts, pod_id_to_info):
                 break
             all_ports |= set(rule.ports)
             for pod_id, pod_info in pod_id_to_info.items():
-                if pod_id in inside_pod_ids:
-                    continue
                 if not rule.judge_pod(pod_info):
                     continue
                 for inside_pod_id in inside_pod_ids:
+                    if inside_pod_id == pod_id:
+                        continue
                     ports = set(rule.ports) if rule.ports else {-1}
                     allowed_flows[(pod_id, inside_pod_id)][0] |= ports
         for rule in policy.egress_rules:
@@ -296,11 +296,11 @@ def get_policy_flows(policy_dicts, pod_id_to_info):
                 break
             all_ports |= set(rule.ports)
             for pod_id, pod_info in pod_id_to_info.items():
-                if pod_id in inside_pod_ids:
-                    continue
                 if not rule.judge_pod(pod_info):
                     continue
                 for inside_pod_id in inside_pod_ids:
+                    if inside_pod_id == pod_id:
+                        continue
                     ports = set(rule.ports) if rule.ports else {-1}
                     allowed_flows[(inside_pod_id, pod_id)][1] |= ports
 
