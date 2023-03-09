@@ -35,15 +35,6 @@ class Endpoint:
         self.hostname = hostname
 
 
-class Flow:
-    def __init__(self, src, dst):
-        self.src = src
-        self.dst = dst
-
-    def __str__(self):
-        return f"{self.src.hostname};{self.src.ip};{self.src.port} -> {self.dst.hostname};{self.dst.ip};{self.dst.port}"
-
-
 class Selector:
     def __init__(self, ns_labels, labels):
         self.ns_labels = ns_labels
@@ -66,6 +57,19 @@ class ResourceInfo:
 
     def get_canonical_name(self):
         return f"{self.rsc_type.name.lower()}-{self.rsc_name}-{self.ns_name}"
+
+
+class Flow:
+    def __init__(self, src_ep: Endpoint, dst_ep: Endpoint, src_rsc: ResourceInfo, dst_rsc: ResourceInfo):
+        self.src_ep = src_ep
+        self.dst_ep = dst_ep
+        self.src_rsc = src_rsc
+        self.dst_rsc = dst_rsc
+
+    def __str__(self):
+        return f"{self.src_ep.hostname};{self.src_ep.ip};{self.src_ep.port};{self.src_rsc.ns_name};{self.src_rsc.rsc_name};{self.src_rsc.rsc_type}" \
+               "->" \
+               f"{self.dst_ep.hostname};{self.dst_ep.ip};{self.dst_ep.port};{self.dst_rsc.ns_name};{self.dst_rsc.rsc_name};{self.dst_rsc.rsc_type}"
 
 
 class JudgeResult(Enum):
@@ -379,7 +383,7 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
                     break
 
             if ingress_state == FlowState.DENIED or egress_state == FlowState.DENIED:
-                abnormal_flows.append(Flow(enp_to_info[fr_enp_id], enp_to_info[to_enp_id]))
+                abnormal_flows.append(Flow(enp_to_info[fr_enp_id], enp_to_info[to_enp_id], fr_rsc_info, to_rsc_info))
 
     return abnormal_flows
 
