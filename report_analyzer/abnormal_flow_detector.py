@@ -222,6 +222,7 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
     enp_to_info = {}
     rsc_to_info = {}
     ns_name_to_labels = {}
+    enp_aliases = {}
 
     static_policies = {}
     for policy_dict in static_policy_dicts:
@@ -303,12 +304,16 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
         proc_to_rsc[proc_id] = dep_id
 
     for enp_id, enp_info in enps.items():
+        # record the adjacency info and alias info of all the endpoints, though some of them may not be used
         enp_to_adj[enp_id] = enp_info["adjacency"] if "adjacency" in enp_info else []
         if "latest" not in enp_info:
             continue
         enp_latest = enp_info["latest"]
         if "host_node_id" not in enp_latest or "pid" not in enp_latest:
             continue
+        if "copy_of" in enp_latest:
+            enp_aliases[enp_id] = enp_latest["copy_of"]["value"]
+        # only endpoint that can be bind to a resource will be added
         host_node_id = enp_latest["host_node_id"]["value"]
         proc_id = assemble_proc_id(host_node_id, enp_latest["pid"]["value"])
         enp_to_info[enp_id] = Endpoint(enp_id.split(";")[-2], enp_id.split(";")[-1], host_node_id.split(";")[0])
@@ -324,7 +329,11 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
         for to_enp_id in to_enps:
             if to_enp_id not in enp_to_rsc:
                 continue
-            to_rsc_id = enp_to_rsc[to_enp_id]
+            # to_enp_id might be an alias which will take effect only when the endpoint is a target
+            true_to_enp_id = to_enp_id
+            if to_enp_id in enp_aliases:
+                true_to_enp_id = enp_aliases[to_enp_id]
+            to_rsc_id = enp_to_rsc[true_to_enp_id]
             if to_rsc_id == fr_rsc_id:
                 continue
             to_rsc_info = rsc_to_info[to_rsc_id]
@@ -338,7 +347,7 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
             if to_rsc_info.ns_name in ignored_namespaces and fr_rsc_info.ns_name in ignored_namespaces:
                 continue
 
-            port = int(to_enp_id.split(";")[-1])
+            port = int(true_to_enp_id.split(";")[-1])
 
             ingress_state = FlowState.NO_MATCH
             egress_state = FlowState.NO_MATCH
@@ -383,7 +392,7 @@ def compare(static_policy_dicts, report, target_uuid, ignored_namespaces):
                     break
 
             if ingress_state == FlowState.DENIED or egress_state == FlowState.DENIED:
-                abnormal_flows.append(Flow(enp_to_info[fr_enp_id], enp_to_info[to_enp_id], fr_rsc_info, to_rsc_info))
+                abnormal_flows.append(Flow(enp_to_info[fr_enp_id], enp_to_info[true_to_enp_id], fr_rsc_info, to_rsc_info))
 
     return abnormal_flows
 
@@ -392,7 +401,7 @@ def example_use_case():
     data_dir = os.path.abspath(os.path.join(__file__, os.pardir, "test_data"))
     ignored_namespaces = {"kube-system", "kube-public", "kube-node-lease", "cattle-system", "fleet-system",
                           "ingress-nginx", "weave", "calico-system", "calico-apiserver"}
-    uuid = "33d1901faed141cf8ccacf5e94961607"
+    uuid = "2b5bb328ebe24572be0914807ba92147"
     report = json.load(open(f"{data_dir}/report.json"))
     static_policies = []
     for test_static_file in os.listdir(f"{data_dir}/static_policies"):
