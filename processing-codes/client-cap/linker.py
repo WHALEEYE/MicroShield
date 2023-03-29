@@ -46,7 +46,10 @@ class Record:
         self.four_tuple = four_tuple
 
     def short_json(self):
-        return {"timestamp": self.timestamp, "hostname": self.hostname, "tuple": self.four_tuple.__dict__}
+        return {"timestamp": self.timestamp, "hostname": self.hostname, "tuple": self.four_tuple.__dict__,
+                "src": {"pod": {}, "service": {}},
+                "dst": {"pod": {}, "service": {}}
+                }
 
 
 class eBPFRecord(Record):
@@ -162,9 +165,33 @@ def link_with_opt(records, report):
     global containers
     global pods
     global deployments
-    process_to_pod = {}
-    endpoints_to_pod = {}
     flows = []
+
+    endpoints = report["Endpoint"]["nodes"]
+    processes = report["Process"]["nodes"]
+    containers = report["Container"]["nodes"]
+    pods = report["Pod"]["nodes"]
+    services = report["Service"]["nodes"]
+    deployments = report["Deployment"]["nodes"]
+
+    svc_ip_to_id = {}
+    pod_ip_to_id = {}
+    pod_ip_to_svc_id = {}
+
+    for pod_id in pods:
+        pod_info = pods[pod_id]
+        if "latest" not in pod_info or "kubernetes_ip" not in pod_info["latest"]:
+            continue
+        pod_ip = pod_info["latest"]["kubernetes_ip"]["value"]
+        pod_ip_to_id[pod_ip] = pod_id
+        if "parents" in pod_info and pod_info["parents"] is not None and "service" in pod_info["parents"]:
+            pod_ip_to_svc_id[pod_ip] = pod_info["parents"]["service"][0]
+
+    for svc_id in services:
+        svc_info = services[svc_id]
+        if "latest" in svc_info and "kubernetes_ip" in svc_info["latest"]:
+            svc_ip_to_id[svc_info["latest"]["kubernetes_ip"]["value"]] = svc_id
+
     for line in records:
         rst = re.search(r"<probe> INFO: (.*)(\..*) \[CONN] \[eBPF] \{(.*)}", line.strip())
         if not rst:
@@ -172,46 +199,35 @@ def link_with_opt(records, report):
         time_array = time.strptime(rst.group(1), "%Y/%m/%d %H:%M:%S")
         flows += parse_eBPF((time.mktime(time_array)) + float(rst.group(2)), rst.group(3))
 
-        endpoints = report["Endpoint"]["nodes"]
-        processes = report["Process"]["nodes"]
-        containers = report["Container"]["nodes"]
-        pods = report["Pod"]["nodes"]
-        for process in processes:
-            if processes[process]["parents"] and "container" in processes[process]["parents"]:
-                ctn = processes[process]['parents']['container'][0]
-                if ctn in containers and 'pod' in containers[ctn]['parents']:
-                    pod = containers[ctn]['parents']['pod'][0]
-                    if pod in pods:
-                        process_to_pod[process] = pods[pod]
-
-        for endpoint in endpoints:
-            if "latest" in endpoints[endpoint]:
-                hostinfo = endpoints[endpoint]["latest"]
-                if "host_node_id" in hostinfo and "pid" in hostinfo:
-                    host = hostinfo["host_node_id"]["value"].split(";")[0]
-                    pid = hostinfo["pid"]["value"]
-                    temp_str = host + ";" + pid
-                    if temp_str in process_to_pod:
-                        parted = endpoint.split(";")
-                        if endpoint.startswith("master"):
-                            parted[0] = "master"
-                        reassembled = ';'.join(parted)
-                        endpoints_to_pod[reassembled] = process_to_pod[temp_str]
-
     processed_records = []
-    services = report["Service"]["nodes"]
-    deployments = report["Deployment"]["nodes"]
 
     for flow in flows:
-        hostname = flow.hostname
-        src_ep = generate_ep_id(hostname, flow.four_tuple.src_addr, flow.four_tuple.src_port)
-        dst_ep = generate_ep_id(hostname, flow.four_tuple.dst_addr, flow.four_tuple.dst_port)
-        if src_ep in endpoints_to_pod and dst_ep in endpoints_to_pod:
-            # Only flows with both endpoints having corresponding pod will be exported
-            tmp_dict = flow.short_json()
-            tmp_dict["src"] = compress_pod(endpoints_to_pod[src_ep])
-            tmp_dict["dst"] = compress_pod(endpoints_to_pod[dst_ep])
-            processed_records.append(json.dumps(tmp_dict))
+        src_ip, src_port = flow.four_tuple.src_addr, flow.four_tuple.src_port
+        dst_ip, dst_port = flow.four_tuple.dst_addr, flow.four_tuple.dst_port
+        if (src_ip not in pod_ip_to_id and src_ip not in svc_ip_to_id) or \
+                (dst_ip not in pod_ip_to_id and dst_ip not in svc_ip_to_id):
+            continue
+        tmp_dict = flow.short_json()
+
+        # source IP is a Pod IP
+        if src_ip in pod_ip_to_id:
+            tmp_dict["src"]["pod"] = compress_info(pods[pod_ip_to_id[src_ip]])
+            if src_ip in pod_ip_to_svc_id:
+                tmp_dict["src"]["service"] = compress_info(services[pod_ip_to_svc_id[src_ip]])
+        # source IP is a Service IP
+        else:
+            tmp_dict["src"]["service"] = compress_info(services[svc_ip_to_id[src_ip]])
+
+        # destination IP is a Pod IP
+        if dst_ip in pod_ip_to_id:
+            tmp_dict["dst"]["pod"] = compress_info(pods[pod_ip_to_id[dst_ip]])
+            if dst_ip in pod_ip_to_svc_id:
+                tmp_dict["dst"]["service"] = compress_info(services[pod_ip_to_svc_id[dst_ip]])
+        # destination IP is a Service IP
+        else:
+            tmp_dict["dst"]["service"] = compress_info(services[svc_ip_to_id[dst_ip]])
+
+        processed_records.append(json.dumps(tmp_dict))
 
     return processed_records
 
