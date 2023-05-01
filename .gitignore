@@ -6,9 +6,8 @@ processing-codes/data/
 report_analyzer/test_flow.txt
 report_analyzer/test_data
 
-evaluation/outs
 evaluation/all_ports
-evaluation/dynamic_policy_generator.py
-evaluation/reports
-evaluation/policies/*.yaml
+evaluation/results/
+evaluation/policies/
+evaluation/reports_cache/
 evaluation/report.json
