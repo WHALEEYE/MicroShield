@@ -65,6 +65,16 @@ TOP_1000_PORTS = {1, 3, 4, 6, 7, 9, 13, 17, 19, 20, 21, 22, 23, 24, 25, 26, 30, 
 
 PRESET_PORTS = TOP_20_PORTS
 
+PROTOCOL_TO_PORT = {"http": 80, "https": 443, "dns": 53, "mysql": 3306, "grpc": 81}
 
 def get_preset_ports():
     return PRESET_PORTS.copy()
+
+def get_protocol_port(protocol):
+    if type(protocol) == int:
+        return protocol
+    prot = protocol.lower()
+    if prot in PROTOCOL_TO_PORT:
+        return PROTOCOL_TO_PORT[prot]
+    return None
+

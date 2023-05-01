@@ -1,6 +1,6 @@
 #!/bin/sh
 
-root_dir=/
+root_dir=/tmp
 namespace=$1
 name=$2
 dst_ip=$3

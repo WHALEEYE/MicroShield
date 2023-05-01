@@ -5,6 +5,7 @@ import json
 import multiprocessing
 import os
 import time
+import subprocess
 from datetime import datetime
 from enum import Enum
 
@@ -101,7 +102,7 @@ class Policy:
                         ns_labels = pod["namespaceSelector"]["matchLabels"] if "namespaceSelector" in pod else {}
                         pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
                         selectors.append(Selector(ns_labels, pod_labels))
-                ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
+                ports = [preset.get_protocol_port(port["port"]) for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.INGRESS, Rule(selectors, ports))
         if "egress" in spec:
             for rule in spec["egress"]:
@@ -111,7 +112,7 @@ class Policy:
                         ns_labels = pod["namespaceSelector"]["matchLabels"] if "namespaceSelector" in pod else {}
                         pod_labels = pod["podSelector"]["matchLabels"] if "podSelector" in pod else {}
                         selectors.append(Selector(ns_labels, pod_labels))
-                ports = [port["port"] for port in rule["ports"]] if "ports" in rule else []
+                ports = [preset.get_protocol_port(port["port"]) for port in rule["ports"]] if "ports" in rule else []
                 policy.add_rule(Direction.EGRESS, Rule(selectors, ports))
         return policy
 
@@ -138,7 +139,7 @@ class Rule:
 
 class EvaluationReport:
     def __init__(self, true_positive_rate, true_negative_rate, rejection_rate, tp_flows, fp_flows, tn_flows, fn_flows,
-                 rejected_flows):
+                 rejected_flows, open_count, rejected_count):
         self.true_positive_rate = true_positive_rate
         self.true_negative_rate = true_negative_rate
         self.rejection_rate = rejection_rate
@@ -147,6 +148,8 @@ class EvaluationReport:
         self.tn_flows = tn_flows
         self.fn_flows = fn_flows
         self.rejected_flows = rejected_flows
+        self.open_count = open_count
+        self.rejected_count = rejected_count
 
     def get_flows_str(self):
         tp_str = "\n".join([f"{ns}:{name} -> {target_ns}:{target_name}({ip}):{ports}" for
@@ -170,6 +173,8 @@ class EvaluationReport:
         return f"True positive rate: {self.true_positive_rate}\n" \
                f"False negative rate: {self.true_negative_rate}\n" \
                f"Rejection rate: {self.rejection_rate}\n" \
+               f"> Open count: {self.open_count}\n" \
+               f"> Rejected count: {self.rejected_count}\n" \
                f"\nDetailed flow information:\n" \
                f"{self.get_flows_str()}"
 
@@ -198,12 +203,12 @@ def assemble_proc_id(host_node_id, pid):
     return host_id + ";" + pid
 
 
-def get_pod_infos(report, uuid=None, ignored_namespaces=None, namespace=None):
+def get_pod_info_from_weave(report, uuid=None, ignored_namespaces=None, namespace=None):
     pods = report["Pod"]["nodes"]
     namespaces = report["Namespace"]["nodes"]
 
     ns_name_to_labels = {}
-    for ns_id, ns_info in namespaces.items():
+    for ns_info in namespaces.values():
         latest_info = ns_info["latest"]
         ns_name = latest_info[NAME_KEY]["value"]
         ns_labels = parse_labels(latest_info)
@@ -233,6 +238,45 @@ def get_pod_infos(report, uuid=None, ignored_namespaces=None, namespace=None):
 
         pod_id_to_info[pod_id] = PodInfo(ns_name, ns_labels, pod_name, pod_labels, pod_ip)
 
+    return pod_id_to_info
+
+
+def get_pod_info_from_api(ignored_namespaces=None, namespace=None):
+    all_pods_info = json.loads(
+        subprocess.run(["kubectl", "get", "pods", "-o", "json", "-A"], stdout=subprocess.PIPE).stdout)
+    pods = all_pods_info["items"]
+    all_ns_info = json.loads(
+        subprocess.run(["kubectl", "get", "ns", "-o", "json", "-A"], stdout=subprocess.PIPE).stdout)
+    namespaces = all_ns_info["items"]
+
+    ns_name_to_labels = {}
+    for ns_info in namespaces:
+        metadata = ns_info["metadata"]
+        ns_name_to_labels[metadata["name"]] = metadata["labels"]
+
+    cur_pod_id = 0
+    # Extract all pods into a dictionary {pod_id: pod_info}
+    pod_id_to_info = {}
+    for pod_info in pods:
+        metadata = pod_info["metadata"]
+
+        # Filter code
+        # Ignore the pods with specific namespaces
+        if ignored_namespaces is not None and metadata["namespace"] in ignored_namespaces:
+            continue
+        # Only consider the pods in the specified namespace
+        if namespace is not None and metadata["namespace"] not in namespace:
+            continue
+
+        pod_name = metadata["name"]
+        pod_ip = pod_info["status"]["podIP"]
+        pod_labels = metadata["labels"]
+        ns_name = metadata["namespace"]
+        ns_labels = ns_name_to_labels[ns_name]
+
+        pod_id_to_info[cur_pod_id] = PodInfo(ns_name, ns_labels, pod_name, pod_labels, pod_ip)
+        cur_pod_id += 1
+        
     return pod_id_to_info
 
 
@@ -327,7 +371,7 @@ def get_policy_flows(policy_dicts, pod_id_to_info):
 def evaluate_one_pod_ip(namespace, name, ips, is_exp, finished_num, lock):
     for ip in ips:
         os.system(
-            f"kubectl exec -n {namespace} {name} -c debugger -- /evaluation_script.sh {namespace} {name} {ip}{' exp' if is_exp else ''}")
+            f"kubectl exec -n {namespace} {name} -c debugger -- /tmp/evaluation_script.sh {namespace} {name} {ip}{' exp' if is_exp else ''}")
     lock.acquire()
     try:
         finished_num.value += 1
@@ -458,7 +502,7 @@ def calculate_statistics(policy_flows, control_flows, exp_flows):
     rejection_rate = rejected_count / open_count if open_count > 0 else 0.0
 
     return EvaluationReport(true_positive_rate, false_negative_rate, rejection_rate, true_positive_flows,
-                            false_positive_flows, true_negative_flows, false_negative_flows, rejected_flows)
+                            false_positive_flows, true_negative_flows, false_negative_flows, rejected_flows, open_count, rejected_count)
 
 
 def collect_evaluation_results(pod_id_to_info, outs_dir):
@@ -467,7 +511,7 @@ def collect_evaluation_results(pod_id_to_info, outs_dir):
     for info in pod_id_to_info.values():
         loading = ["|", "/", "-", "\\"][finished % 4]
         print(f"\r{loading} Finished: \033[1m{finished}/{total}\033[0m", end="")
-        os.system(f"kubectl cp {info.ns_name}/{info.name}:outs {outs_dir} -c debugger")
+        os.system(f"kubectl cp {info.ns_name}/{info.name}:tmp/outs {outs_dir} -c debugger")
         finished += 1
     finish_icon = "✓"
     print(f"\r{finish_icon} Finished: \033[1m{finished}/{total}\033[0m")
@@ -479,30 +523,36 @@ def data_preparation(pod_id_to_info, root_dir):
     for info in pod_id_to_info.values():
         loading = ["|", "/", "-", "\\"][finished % 4]
         print(f"\r{loading} Finished: \033[1m{finished}/{total}\033[0m", end="")
-        os.system(f"kubectl cp {root_dir}/all_ports {info.ns_name}/{info.name}:/ -c debugger")
-        os.system(f"kubectl cp {root_dir}/evaluation_script.sh {info.ns_name}/{info.name}:/ -c debugger")
-        os.system(f"kubectl exec -n {info.ns_name} {info.name} -c debugger -- rm -rf /outs")
+        os.system(f"kubectl cp {root_dir}/all_ports {info.ns_name}/{info.name}:/tmp/ -c debugger")
+        os.system(f"kubectl cp {root_dir}/evaluation_script.sh {info.ns_name}/{info.name}:/tmp/ -c debugger")
+        os.system(f"kubectl exec -n {info.ns_name} {info.name} -c debugger -- rm -rf /tmp/outs")
         finished += 1
     finish_icon = "✓"
     print(f"\r{finish_icon} Finished: \033[1m{finished}/{total}\033[0m")
 
 
 def evaluate():
+    # prepare data
+    ignored_namespaces = {"kube-system", "kube-public", "kube-node-lease", "cattle-system", "fleet-system",
+                          "ingress-nginx", "weave", "calico-system", "calico-apiserver"}
+    namespace = {"pitstop"}
+    
     # paths that will be used
     root_dir = os.path.abspath(os.path.join(__file__, os.pardir))
-    policies_dir = os.path.join(root_dir, "policies")
-    outs_dir = os.path.join(root_dir, "outs")
+    policies_dir = os.path.join(root_dir, f"policies/{namespace}")
+    result_dir = os.path.join(root_dir, f"results/{namespace}")
+    outs_dir = os.path.join(result_dir, "outs")
     outs_control_dir = os.path.join(outs_dir, "control")
     outs_exp_dir = os.path.join(outs_dir, "exp")
-    reports_dir = os.path.join(root_dir, "reports")
+    reports_cache_dir = os.path.join(root_dir, "reports_cache")
 
     # create directories if not exist
     if not os.path.exists(outs_control_dir):
         os.makedirs(outs_control_dir)
     if not os.path.exists(outs_exp_dir):
         os.makedirs(outs_exp_dir)
-    if not os.path.exists(reports_dir):
-        os.makedirs(reports_dir)
+    if not os.path.exists(reports_cache_dir):
+        os.makedirs(reports_cache_dir)
 
     if not args.report_only:
         # clear the directory
@@ -510,21 +560,11 @@ def evaluate():
             os.remove(os.path.join(outs_control_dir, file))
         for file in os.listdir(outs_exp_dir):
             os.remove(os.path.join(outs_exp_dir, file))
-
-    # prepare data
-    ignored_namespaces = {"kube-system", "kube-public", "kube-node-lease", "cattle-system", "fleet-system",
-                          "ingress-nginx", "weave", "calico-system", "calico-apiserver"}
-    uuid = "33d1901faed141cf8ccacf5e94961607"
-    namespace = {"nginx"}
-    # report_raw_json = open(os.path.join(root_dir, "report.json"), "r").read()
-    scope_url = "http://192.168.218.133:4040"
-    report_raw_json = requests.get(f"{scope_url}/api/report").content.decode()
-    report = json.loads(report_raw_json)
     policy_dicts = []
     for policy_file in os.listdir(policies_dir):
         policy_dicts.append(yaml.safe_load(open(os.path.join(policies_dir, policy_file))))
 
-    pod_id_to_info = get_pod_infos(report, namespace=namespace)
+    pod_id_to_info = get_pod_info_from_api(namespace=namespace)
     if len(pod_id_to_info) == 0:
         print(f"\033[31mNumber of valid pods ({len(pod_id_to_info)}) < 2, aborting...\033[0m")
         return
@@ -589,10 +629,13 @@ def evaluate():
     print(f"\nGenerated at {timestamp}:")
     print(f"\033[36m{evaluation_report}\033[0m")
 
-    report_file = f"{reports_dir}/{timestamp}"
-    with open(report_file, "w") as f:
+    report_file_path = f"{result_dir}/report.txt"
+    report_cache_file_path = f"{reports_cache_dir}/{timestamp}.txt"
+    with open(report_file_path, "w") as f:
         f.write(evaluation_report.get_full_report())
-    print(f"Full evaluation report generated at {report_file}.")
+    with open(report_cache_file_path, "w") as f:
+        f.write(evaluation_report.get_full_report())
+    print(f"Full evaluation report generated at {report_file_path}.")
 
 
 if __name__ == "__main__":
@@ -617,3 +660,4 @@ if __name__ == "__main__":
     else:
         pn = int(args.process_number)
     evaluate()
+
