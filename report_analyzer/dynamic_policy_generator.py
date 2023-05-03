@@ -94,7 +94,7 @@ class Rule:
 
     def __eq__(self, other):
         return self.direction == other.direction and self.outside_resource_labels == other.outside_resource_labels and \
-               self.outside_resource_ns == other.outside_resource_ns and self.ports == other.ports
+            self.outside_resource_ns == other.outside_resource_ns and self.ports == other.ports
 
 
 def get_port_from_enp_id(enp_id):
@@ -127,7 +127,7 @@ def assemble_proc_id(host_node_id, pid):
     return host_id + ";" + pid
 
 
-def analyze_report(report, uuid, ignored_namespaces):
+def analyze_report(report, namespace, uuid=None, ignored_namespaces=None):
     process_to_pod = {}
     enp_to_pod = {}
     enp_to_adj = {}
@@ -155,6 +155,9 @@ def analyze_report(report, uuid, ignored_namespaces):
             continue
         # Ignore the pods with specific namespaces
         if ignored_namespaces is not None and latest_info[NAMESPACE_KEY]["value"] in ignored_namespaces:
+            continue
+        # Only consider the pods in the specified namespace
+        if latest_info[NAMESPACE_KEY]["value"] != namespace:
             continue
         process_to_pod[proc_id] = prt_pod_id
 
@@ -225,8 +228,8 @@ def output_policies_to_dir(policies, dir_path):
                 f.write(yaml_content)
 
 
-def generate_dynamic_policies(report, uuid, ignored_namespaces):
-    policies = analyze_report(report, uuid, ignored_namespaces)
+def generate_dynamic_policies(report, namespace, uuid=None, ignored_namespaces=None):
+    policies = analyze_report(report, namespace, uuid, ignored_namespaces)
     output_policies_to_dir(policies.values(), "policies")
 
 
@@ -237,5 +240,5 @@ if __name__ == "__main__":
                                "ingress-nginx", "weave", "calico-system", "calico-apiserver"}
     test_uuid = "33d1901faed141cf8ccacf5e94961607"
     test_report = json.load(open(f"{TEST_DATA_DIR}/report.json"))
-    generate_dynamic_policies(test_report, None, test_ignored_namespaces)
+    generate_dynamic_policies(test_report, ignored_namespaces=test_ignored_namespaces, namespace="sock-shop")
     print("Time used: " + str(time.time() - start_time))

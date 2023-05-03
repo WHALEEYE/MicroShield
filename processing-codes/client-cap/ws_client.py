@@ -9,7 +9,7 @@ import websockets
 
 import linker
 
-MASTER_NODE_IP = 'localhost'
+MASTER_NODE_IP = '192.168.218.133'
 WS_PORT = 8765
 HTTP_PORT = 4040
 FLOW_FILE = '../data/flows.json'
@@ -33,10 +33,11 @@ async def ws_handler():
             processed_records = linker.link_with_opt(rcv, rpt)
             total_received += len(rcv)
             total_processed += len(processed_records)
-            # with open("../data/flows.log", "a", encoding='utf8') as f:
-            #     f.write('\n'.join(rcv) + '\n')
-            # with open("../data/report.json", "w", encoding='utf8') as f:
-            #     json.dump(rpt, f, indent=4)
+            if debug:
+                with open("../data/flows.log", "a", encoding='utf8') as f:
+                    f.write('\n'.join(rcv) + '\n')
+                with open("../data/report.json", "w", encoding='utf8') as f:
+                    json.dump(rpt, f, indent=4)
             if processed_records:
                 with open(FLOW_FILE, "a", encoding='utf8') as flow_file:
                     flow_file.write('\n'.join(processed_records) + '\n')
@@ -44,6 +45,8 @@ async def ws_handler():
 
 
 if __name__ == "__main__":
+    debug = False
+
     if not os.path.exists("../data"):
         os.makedirs("../data")
 

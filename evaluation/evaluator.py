@@ -539,8 +539,8 @@ def evaluate():
     
     # paths that will be used
     root_dir = os.path.abspath(os.path.join(__file__, os.pardir))
-    policies_dir = os.path.join(root_dir, f"policies/{namespace}")
-    result_dir = os.path.join(root_dir, f"results/{namespace}")
+    policies_dir = os.path.join(root_dir, f"policies")
+    result_dir = os.path.join(root_dir, f"results")
     outs_dir = os.path.join(result_dir, "outs")
     outs_control_dir = os.path.join(outs_dir, "control")
     outs_exp_dir = os.path.join(outs_dir, "exp")
