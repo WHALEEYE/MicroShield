@@ -11,3 +11,5 @@ evaluation/results/
 evaluation/policies/
 evaluation/reports_cache/
 evaluation/report.json
+
+venv/
